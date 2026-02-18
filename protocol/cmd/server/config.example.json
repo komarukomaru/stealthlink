@@ -1,0 +1,74 @@
+{
+    "bind_address": ":443",
+    "sni": "your-domain.com",
+    "transport": "tls",
+    "camouflage": {
+        "enabled": true,
+        "target": "https://www.microsoft.com",
+        "secret_path": "/api/v2/sync",
+        "web_root": "",
+        "cert_file": "",
+        "key_file": "",
+        "index_file": "index.html"
+    },
+    "users": [
+        {
+            "id": "user1",
+            "psk": "CHANGE-ME-RANDOM-STRING-HERE",
+            "max_bandwidth": 104857600,
+            "allowed_ports": [
+                {
+                    "from": 1,
+                    "to": 65535
+                }
+            ],
+            "expires_at": "2027-12-31T23:59:59Z"
+        },
+        {
+            "id": "user2",
+            "psk": "ANOTHER-RANDOM-KEY-HERE",
+            "max_bandwidth": 52428800,
+            "allowed_ports": [
+                {
+                    "from": 80,
+                    "to": 80
+                },
+                {
+                    "from": 443,
+                    "to": 443
+                },
+                {
+                    "from": 8080,
+                    "to": 8090
+                }
+            ],
+            "expires_at": "2027-06-01T00:00:00Z"
+        }
+    ],
+    "firewall": {
+        "blocked_ports": [
+            25,
+            465,
+            587,
+            137,
+            138,
+            139,
+            445
+        ],
+        "max_connections_per_user": 2000,
+        "max_bandwidth_default": 0,
+        "allow_private_ranges": false
+    },
+    "padding": {
+        "enabled": true,
+        "min_padding_bytes": 16,
+        "max_padding_bytes": 256,
+        "normalize_size": true
+    },
+    "stealth": {
+        "enabled": true,
+        "decoy_streams": true,
+        "protocol_polymorphism": true,
+        "adaptive_throttling": true
+    }
+}

@@ -1,0 +1,57 @@
+{
+    "bind_address": ":443",
+    "sni": "entry-server.com",
+    "transport": "tls",
+    "camouflage": {
+        "enabled": true,
+        "target": "https://www.google.com",
+        "secret_path": "/api/v2/sync"
+    },
+    "users": [
+        {
+            "id": "direct_user",
+            "psk": "key-for-direct-access",
+            "max_bandwidth": 0,
+            "allowed_ports": [
+                {
+                    "from": 1,
+                    "to": 65535
+                }
+            ]
+        },
+        {
+            "id": "cascaded_user",
+            "psk": "key-for-cascaded-access",
+            "upstream": {
+                "address": "exit-server.com:443",
+                "psk": "key-for-exit-server",
+                "sni": "exit-server.com",
+                "secret_path": "/api/v2/sync"
+            },
+            "max_bandwidth": 0,
+            "allowed_ports": [
+                {
+                    "from": 1,
+                    "to": 65535
+                }
+            ]
+        }
+    ],
+    "firewall": {
+        "blocked_ports": [
+            25,
+            465,
+            587
+        ],
+        "max_connections_per_user": 2000,
+        "allow_private_ranges": false
+    },
+    "padding": {
+        "enabled": true,
+        "min_padding_bytes": 16,
+        "max_padding_bytes": 256
+    },
+    "stealth": {
+        "enabled": true
+    }
+}
