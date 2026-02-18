@@ -43,15 +43,58 @@ protocol/
 
 ### Build
 
+**Windows:**
 ```bash
-# Build Server
-cd cmd/server
-go build -o server
-
-# Build Client
-cd ../client
-go build -o client
+./build.ps1
 ```
+
+**Linux:**
+```bash
+./build.sh
+```
+
+## Usage
+
+### Server
+
+1. **Generate Configuration**:
+   The server can generate a default configuration file:
+   ```bash
+   ./server -gen-config
+   ```
+
+2. **Run Server**:
+   ```bash
+   ./server -config config.json
+   ```
+
+### Client
+
+The client is configured primarily via command-line flags. It does not currently support a JSON config file argument, but can load subscription links.
+
+1. **CLI Mode** (Manual Configuration):
+   ```bash
+   ./client -server "1.2.3.4:443" -psk "YOUR-PSK" -sni "www.google.com"
+   ```
+
+2. **StealthLink Subscription**:
+   Connect using a subscription URL (StealthLink URI):
+   ```bash
+   ./client -sub "stealthlink://..."
+   ```
+
+3. **VPN Mode (TUN Interface)**:
+   Enable full system VPN mode (requires Administrator/Root privileges):
+   ```bash
+   ./client -server "1.2.3.4:443" -psk "YOUR-PSK" -tun
+   ```
+
+4. **Proxy Mode**:
+   By default, the client starts a SOCKS5 proxy on `127.0.0.1:1080`.
+   You can change this or add an HTTP proxy:
+   ```bash
+   ./client -socks ":1080" -http ":8080" -server "..." ...
+   ```
 
 ## Configuration
 
@@ -78,8 +121,8 @@ The server is configured via a JSON file. See `cmd/server/config.example.json` f
 }
 ```
 
-### Client
-The client can connect using a configuration file or command-line arguments.
+### DPI Bypass Capabilities
+Russia: tested ✅
 
 ## Tools
 - `generate_link.py`: A helper script to generate `stealthlink://` connection strings for easy client configuration.
