@@ -162,5 +162,11 @@ The following items are currently prioritized for development:
 - [ ] **Protocol Acceleration**
 - [ ] **Full Android Support**
 
+## License
+
+This project is licensed under the **GNU Affero General Public License v3.0 (AGPL-3.0)**. 
+
+**Note on historical commits:** The terms of this license apply to the entire codebase and all versions of this project contained within this repository, including all historical commits dating back to the initial commit (`22acb0b`). Any use, modification, or distribution of the code from any point in the repository's history is subject to the AGPL-3.0 terms.
+
 ## Support
 Ton: `UQDskITDe7iP6TAFwgV7YXUNrIISZkUtgfed6sFpyu9SD6mG`
