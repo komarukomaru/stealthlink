@@ -6,27 +6,22 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strings"
 	"time"
+
+	utls "github.com/refraction-networking/utls"
 )
 
-func DialVPNServer(serverAddr, sni, psk, secretPath string, addrType byte, addr string, port uint16) (net.Conn, error) {
+func DialVPNServer(serverAddr, sni, psk, secretPath, fingerprint string, addrType byte, addr string, port uint16) (net.Conn, error) {
 	if sni == "" {
 		host, _, _ := net.SplitHostPort(serverAddr)
 		sni = host
 	}
 
-	tlsConf := &tls.Config{
-		ServerName:         sni,
-		InsecureSkipVerify: true,
-		MinVersion:         tls.VersionTLS12,
-		NextProtos:         []string{"http/1.1"},
-	}
-
-	conn, err := tls.DialWithDialer(&net.Dialer{Timeout: 15 * time.Second}, "tcp", serverAddr, tlsConf)
+	conn, err := DialTransport(serverAddr, sni, fingerprint)
 	if err != nil {
-		return nil, fmt.Errorf("TLS dial failed: %w", err)
+		return nil, err
 	}
-	TuneTCPConn(conn)
 
 	authPayload, err := GenerateAuthPayload(psk)
 	if err != nil {
@@ -108,5 +103,77 @@ func DialUpstream(config *UpstreamConfig, addrType byte, addr string, port uint1
 	if secretPath == "" {
 		secretPath = "/api/v2/sync"
 	}
-	return DialVPNServer(config.Address, config.SNI, config.PSK, secretPath, addrType, addr, port)
+	return DialVPNServer(config.Address, config.SNI, config.PSK, secretPath, config.Fingerprint, addrType, addr, port)
+}
+
+func DialTransport(serverAddr, sni, fingerprint string) (net.Conn, error) {
+	var conn net.Conn
+	var err error
+
+	if fingerprint == "" {
+		tlsConf := &tls.Config{
+			ServerName:         sni,
+			InsecureSkipVerify: true,
+			MinVersion:         tls.VersionTLS12,
+			NextProtos:         []string{"http/1.1"},
+		}
+
+		conn, err = tls.DialWithDialer(&net.Dialer{Timeout: 15 * time.Second}, "tcp", serverAddr, tlsConf)
+		if err != nil {
+			return nil, fmt.Errorf("TLS dial failed: %w", err)
+		}
+	} else {
+		conn, err = dialUTLS(serverAddr, sni, fingerprint)
+		if err != nil {
+			return nil, err
+		}
+	}
+	TuneTCPConn(conn)
+	return conn, nil
+}
+
+func dialUTLS(serverAddr, sni, fingerprint string) (net.Conn, error) {
+	// https://github.com/komarukomaru/stealthlink/issues/2
+	var helloID utls.ClientHelloID
+	switch strings.ToLower(fingerprint) {
+	case "chrome":
+		helloID = utls.HelloChrome_Auto
+	case "firefox":
+		helloID = utls.HelloFirefox_Auto
+	case "edge":
+		helloID = utls.HelloEdge_Auto
+	case "safari":
+		helloID = utls.HelloSafari_Auto
+	case "ios":
+		helloID = utls.HelloIOS_Auto
+	case "android":
+		helloID = utls.HelloAndroid_11_OkHttp
+	case "360":
+		helloID = utls.Hello360_Auto
+	case "qq":
+		helloID = utls.HelloQQ_Auto
+	case "random":
+		helloID = utls.HelloRandomized
+	default:
+		helloID = utls.HelloChrome_Auto
+	}
+
+	config := &utls.Config{
+		ServerName:         sni,
+		InsecureSkipVerify: true,
+		NextProtos:         []string{"http/1.1"},
+	}
+
+	conn, err := net.DialTimeout("tcp", serverAddr, 15*time.Second)
+	if err != nil {
+		return nil, fmt.Errorf("TCP dial failed: %w", err)
+	}
+
+	uConn := utls.UClient(conn, config, helloID)
+	if err := uConn.Handshake(); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("uTLS handshake failed: %w", err)
+	}
+
+	return uConn, nil
 }

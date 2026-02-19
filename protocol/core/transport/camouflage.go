@@ -43,24 +43,26 @@ func DefaultCamouflageConfig() CamouflageConfig {
 }
 
 type CamouflageServer struct {
-	config     CamouflageConfig
-	auth       *AuthManager
-	firewall   *Firewall
-	tlsConfig  *tls.Config
-	fileServer http.Handler
-	targetURL  *url.URL
-	httpClient *http.Client
+	config       CamouflageConfig
+	auth         *AuthManager
+	firewall     *Firewall
+	replayFilter *ReplayFilter
+	tlsConfig    *tls.Config
+	fileServer   http.Handler
+	targetURL    *url.URL
+	httpClient   *http.Client
 
 	mu         sync.RWMutex
 	vpnHandler func(conn net.Conn, session *AuthSession)
 	listener   net.Listener
 }
 
-func NewCamouflageServer(config CamouflageConfig, auth *AuthManager, fw *Firewall) (*CamouflageServer, error) {
+func NewCamouflageServer(config CamouflageConfig, auth *AuthManager, fw *Firewall, rf *ReplayFilter) (*CamouflageServer, error) {
 	cs := &CamouflageServer{
-		config:   config,
-		auth:     auth,
-		firewall: fw,
+		config:       config,
+		auth:         auth,
+		firewall:     fw,
+		replayFilter: rf,
 	}
 
 	if config.TargetURL != "" {
@@ -133,20 +135,14 @@ func (cs *CamouflageServer) SetVPNHandler(handler func(conn net.Conn, session *A
 }
 
 func (cs *CamouflageServer) Start(addr string) error {
-	var listener net.Listener
-	var err error
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("listen failed: %w", err)
+	}
 
 	if cs.tlsConfig != nil {
-		listener, err = tls.Listen("tcp", addr, cs.tlsConfig)
-		if err != nil {
-			return fmt.Errorf("TLS listen failed: %w", err)
-		}
 		log.Printf("[Camouflage] TLS server listening on %s (real cert)", addr)
 	} else {
-		listener, err = net.Listen("tcp", addr)
-		if err != nil {
-			return fmt.Errorf("listen failed: %w", err)
-		}
 		log.Printf("[Camouflage] Plain TCP server listening on %s (self-signed)", addr)
 	}
 
@@ -157,8 +153,34 @@ func (cs *CamouflageServer) Start(addr string) error {
 		if err != nil {
 			continue
 		}
-		go cs.handleConnection(conn)
+		go cs.handleConnectionWrapped(conn)
 	}
+}
+
+func (cs *CamouflageServer) handleConnectionWrapped(conn net.Conn) {
+	if cs.replayFilter != nil {
+		pConn, err := NewPeekingConn(conn, 64)
+		if err != nil {
+			conn.Close()
+			return
+		}
+
+		peekData := pConn.Peek()
+		if len(peekData) > 11+32 && peekData[0] == 0x16 {
+			randomBytes := peekData[11 : 11+32]
+			if cs.replayFilter.CheckAndAdd(randomBytes) {
+				pConn.Close()
+				return
+			}
+		}
+		conn = pConn
+	}
+
+	if cs.tlsConfig != nil {
+		conn = tls.Server(conn, cs.tlsConfig)
+	}
+
+	cs.handleConnection(conn)
 }
 
 func (cs *CamouflageServer) handleConnection(conn net.Conn) {

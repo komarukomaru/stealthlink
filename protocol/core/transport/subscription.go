@@ -20,12 +20,13 @@ type SubscriptionConfig struct {
 }
 
 type ServerEntry struct {
-	Address    string `json:"address"`
-	PSK        string `json:"psk"`
-	SNI        string `json:"sni"`
-	Weight     int    `json:"weight"`
-	Transport  string `json:"transport"`
-	SecretPath string `json:"secret_path,omitempty"`
+	Address     string `json:"address"`
+	PSK         string `json:"psk"`
+	SNI         string `json:"sni"`
+	Weight      int    `json:"weight"`
+	Transport   string `json:"transport"`
+	SecretPath  string `json:"secret_path,omitempty"`
+	Fingerprint string `json:"fingerprint,omitempty"`
 }
 
 const subscriptionScheme = "stealthlink://"

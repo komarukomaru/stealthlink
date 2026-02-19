@@ -23,10 +23,11 @@ type UserRecord struct {
 }
 
 type UpstreamConfig struct {
-	Address    string `json:"address"`
-	PSK        string `json:"psk"`
-	SNI        string `json:"sni"`
-	SecretPath string `json:"secret_path"`
+	Address     string `json:"address"`
+	PSK         string `json:"psk"`
+	SNI         string `json:"sni"`
+	SecretPath  string `json:"secret_path"`
+	Fingerprint string `json:"fingerprint"` // https://github.com/komarukomaru/stealthlink/issues/2
 }
 
 type PortRange struct {

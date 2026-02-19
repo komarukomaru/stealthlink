@@ -77,6 +77,13 @@ The client is configured primarily via command-line flags. It does not currently
    ./client -server "1.2.3.4:443" -psk "YOUR-PSK" -sni "www.google.com"
    ```
 
+   **uTLS Fingerprint**:
+   To mimic a specific browser (evade DPI blocking), use the `-fingerprint` flag:
+   ```bash
+   ./client -server "..." -fingerprint chrome
+   ```
+   Available fingerprints: `chrome`, `firefox`, `edge`, `safari`, `ios`, `android`, `360`, `qq`, `random`.
+
 2. **StealthLink Subscription**:
    Connect using a subscription URL (StealthLink URI):
    ```bash
@@ -115,7 +122,12 @@ The server is configured via a JSON file. See `cmd/server/config.example.json` f
         {
             "id": "user1",
             "psk": "YOUR-SECURE-KEY",
-            "max_bandwidth": 1073741824
+            "max_bandwidth": 1073741824,
+            // Optional: "upstream" is used when generating subscription links or for cascading mode.
+            // Do NOT set this for standard server users unless you want to redirect their traffic to another VPN.
+            "upstream": {
+                "fingerprint": "chrome"
+            }
         }
     ]
 }

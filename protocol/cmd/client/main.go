@@ -23,6 +23,7 @@ func main() {
 	noStealth := flag.Bool("no-stealth", false, "Disable stealth features")
 	tunMode := flag.Bool("tun", false, "Use TUN device for full system VPN")
 	tunCIDR := flag.String("tun-cidr", "10.0.0.2/24", "TUN interface CIDR")
+	fingerprint := flag.String("fingerprint", "", "uTLS fingerprint (chrome, firefox, ios, android, 360, qq, random)") // https://github.com/komarukomaru/stealthlink/issues/2
 	flag.Parse()
 
 	var subscription *transport.SubscriptionConfig
@@ -60,6 +61,7 @@ func main() {
 		PaddingCfg:   paddingCfg,
 		StealthCfg:   stealthCfg,
 		Subscription: subscription,
+		Fingerprint:  *fingerprint,
 	}
 
 	client := transport.NewClient(config)

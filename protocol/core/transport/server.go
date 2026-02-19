@@ -33,9 +33,10 @@ type ServerConfig struct {
 }
 
 type Server struct {
-	config   ServerConfig
-	auth     *AuthManager
-	firewall *Firewall
+	config       ServerConfig
+	auth         *AuthManager
+	firewall     *Firewall
+	replayFilter *ReplayFilter
 
 	mu       sync.RWMutex
 	sessions map[string]int
@@ -43,10 +44,11 @@ type Server struct {
 
 func NewServer(config ServerConfig) *Server {
 	return &Server{
-		config:   config,
-		auth:     NewAuthManager(config.Users),
-		firewall: NewFirewall(config.FirewallCfg),
-		sessions: make(map[string]int),
+		config:       config,
+		auth:         NewAuthManager(config.Users),
+		firewall:     NewFirewall(config.FirewallCfg),
+		replayFilter: NewReplayFilter(100000, 5*time.Minute),
+		sessions:     make(map[string]int),
 	}
 }
 
@@ -74,7 +76,7 @@ func (s *Server) Start() error {
 
 func (s *Server) startTLS() error {
 	if s.config.Camouflage.Enabled {
-		cs, err := NewCamouflageServer(s.config.Camouflage, s.auth, s.firewall)
+		cs, err := NewCamouflageServer(s.config.Camouflage, s.auth, s.firewall, s.replayFilter)
 		if err != nil {
 			return err
 		}
@@ -84,12 +86,12 @@ func (s *Server) startTLS() error {
 		return cs.Start(s.config.BindAddress)
 	}
 
-	tlsConfig, err := s.generateTLSConfigForTransport("tls")
+	listener, err := net.Listen("tcp", s.config.BindAddress)
 	if err != nil {
 		return err
 	}
 
-	listener, err := tls.Listen("tcp", s.config.BindAddress, tlsConfig)
+	tlsConfig, err := s.generateTLSConfigForTransport("tls")
 	if err != nil {
 		return err
 	}
@@ -101,13 +103,35 @@ func (s *Server) startTLS() error {
 		if err != nil {
 			continue
 		}
-		go s.handleTLSConnection(conn)
+		go s.handleTLSConnectionWrapped(conn, tlsConfig)
 	}
+}
+
+func (s *Server) handleTLSConnectionWrapped(conn net.Conn, tlsConfig *tls.Config) {
+	if s.replayFilter != nil {
+		pConn, err := NewPeekingConn(conn, 64)
+		if err != nil {
+			conn.Close()
+			return
+		}
+		peekData := pConn.Peek()
+		if len(peekData) > 43 && peekData[0] == 0x16 {
+			randomBytes := peekData[11 : 11+32]
+			if s.replayFilter.CheckAndAdd(randomBytes) {
+				pConn.Close()
+				return
+			}
+		}
+		conn = pConn
+	}
+
+	tlsConn := tls.Server(conn, tlsConfig)
+	s.handleTLSConnection(tlsConn)
 }
 
 func (s *Server) startTLSFallback() error {
 	if s.config.Camouflage.Enabled {
-		cs, err := NewCamouflageServer(s.config.Camouflage, s.auth, s.firewall)
+		cs, err := NewCamouflageServer(s.config.Camouflage, s.auth, s.firewall, s.replayFilter)
 		if err != nil {
 			return err
 		}
@@ -395,7 +419,12 @@ func (s *Server) startQUIC() error {
 	udpConn.SetReadBuffer(7 * 1024 * 1024)
 	udpConn.SetWriteBuffer(7 * 1024 * 1024)
 
-	tr := &quic.Transport{Conn: udpConn}
+	var packetConn net.PacketConn = udpConn
+	if s.replayFilter != nil {
+		packetConn = &ReplayProtectedPacketConn{PacketConn: udpConn, filter: s.replayFilter}
+	}
+
+	tr := &quic.Transport{Conn: packetConn}
 
 	quicConf := &quic.Config{
 		KeepAlivePeriod:                15 * time.Second,

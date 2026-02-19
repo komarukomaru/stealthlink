@@ -28,6 +28,7 @@ type ClientConfig struct {
 	PaddingCfg   PaddingConfig
 	StealthCfg   StealthConfig
 	Subscription *SubscriptionConfig
+	Fingerprint  string // https://github.com/komarukomaru/stealthlink/issues/2
 }
 
 type Client struct {
@@ -127,11 +128,12 @@ func (c *Client) resolveServer() *ServerEntry {
 	}
 
 	return &ServerEntry{
-		Address:    c.config.ServerAddr,
-		PSK:        c.config.PSK,
-		SNI:        c.config.SNI,
-		Transport:  c.config.Transport,
-		SecretPath: c.config.SecretPath,
+		Address:     c.config.ServerAddr,
+		PSK:         c.config.PSK,
+		SNI:         c.config.SNI,
+		Transport:   c.config.Transport,
+		SecretPath:  c.config.SecretPath,
+		Fingerprint: c.config.Fingerprint,
 	}
 }
 
@@ -172,9 +174,13 @@ func (c *Client) connectTLS(server *ServerEntry, psk string) error {
 	log.Printf("[Client] TLS per-connection mode to %s (SNI: %s)", server.Address, sni)
 
 	serverAddr := server.Address
+	fingerprint := server.Fingerprint
+	if fingerprint == "" {
+		fingerprint = c.config.Fingerprint
+	}
 
 	c.proxy.SetDialer(func(addrType byte, addr string, port uint16) (net.Conn, error) {
-		conn, err := DialVPNServer(serverAddr, sni, psk, secretPath, addrType, addr, port)
+		conn, err := DialVPNServer(serverAddr, sni, psk, secretPath, fingerprint, addrType, addr, port)
 		if err != nil {
 			log.Printf("[Client] Dial failed %s:%d: %v", addr, port, err)
 		}
@@ -205,18 +211,15 @@ func (c *Client) connectTLSForTUN(server *ServerEntry, psk string) error {
 
 	log.Printf("[Client] TLS TUN persistent mode to %s (SNI: %s)", server.Address, sni)
 
-	tlsConf := &tls.Config{
-		ServerName:         sni,
-		InsecureSkipVerify: true,
-		MinVersion:         tls.VersionTLS12,
-		NextProtos:         []string{"http/1.1"},
+	fingerprint := server.Fingerprint
+	if fingerprint == "" {
+		fingerprint = c.config.Fingerprint
 	}
 
-	conn, err := tls.DialWithDialer(&net.Dialer{Timeout: 15 * time.Second}, "tcp", server.Address, tlsConf)
+	conn, err := DialTransport(server.Address, sni, fingerprint)
 	if err != nil {
-		return fmt.Errorf("TLS dial failed: %w", err)
+		return fmt.Errorf("TLS/uTLS dial failed: %w", err)
 	}
-	TuneTCPConn(conn)
 
 	authPayload, err := GenerateAuthPayload(psk)
 	if err != nil {
@@ -280,9 +283,12 @@ func (c *Client) connectTLSForTUN(server *ServerEntry, psk string) error {
 
 	log.Printf("[Client] TUN persistent connection established")
 
+	// Capture variables for the closure to avoid any potential race if server pointer changes (though unlikely here)
+	// 'fingerprint' is already resolved at the top of the function
 	serverAddr := server.Address
+
 	c.proxy.SetDialer(func(addrType byte, addr string, port uint16) (net.Conn, error) {
-		r, err := DialVPNServer(serverAddr, sni, psk, secretPath, addrType, addr, port)
+		r, err := DialVPNServer(serverAddr, sni, psk, secretPath, fingerprint, addrType, addr, port)
 		if err != nil {
 			log.Printf("[Client] Dial failed %s:%d: %v", addr, port, err)
 		}
