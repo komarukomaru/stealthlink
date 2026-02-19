@@ -146,3 +146,6 @@ The following items are currently prioritized for development:
 - [ ] **Optimize QUIC Protocol**
 - [ ] **Protocol Acceleration**
 - [ ] **Full Android Support**
+
+## Support
+Ton: `UQDskITDe7iP6TAFwgV7YXUNrIISZkUtgfed6sFpyu9SD6mG`
