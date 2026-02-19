@@ -14,6 +14,8 @@ StealthLink is a high-performance, censorship-resistant VPN protocol designed to
   - **Camouflage**: Mimics legitimate web server traffic (e.g., Microsoft, Cloudflare, Apple) to blend in.
   - **Padding**: Intelligent random padding to defeat packet size analysis.
   - **Protocol Polymorphism**: Dynamic signature modifications to evade static fingerprinting.
+  - **Replay Protection**: Rotating Bloom Filter to detect and block active probing attacks (e.g., replayed handshakes).
+  - **uTLS Support**: Client mimics popular browser fingerprints (Chrome, Firefox, iOS, etc.) to blend with legitimate traffic.
   - **Adaptive Throttling**: Responds to active probing by throttling or dropping connections to simulate a standard web server.
 
 ### User & Network Management
@@ -105,6 +107,19 @@ The client is configured primarily via command-line flags. It does not currently
 
 ## Configuration
 
+### Transport Modes
+The server supports strict transport selection to optimize for specific network conditions or security requirements:
+
+- **`tls`**: Standard TLS 1.3 over TCP. 
+  - *Best for*: Maximum compatibility, restrictive firewalls that block UDP.
+  - *Behavior*: Listens ONLY on TCP. UDP/QUIC is disabled.
+- **`quic`**: HTTP/3 over QUIC (UDP).
+  - *Best for*: High performance, low latency, lossy networks.
+  - *Behavior*: Listens ONLY on UDP. TCP/TLS fallback is disabled.
+- **`any`**: Dual-stack mode.
+  - *Best for*: Flexibility. Clients can choose their preferred transport.
+  - *Behavior*: Listens on BOTH UDP (QUIC) and TCP (TLS).
+
 ### Server
 The server is configured via a JSON file. See `cmd/server/config.example.json` for a complete example.
 
@@ -113,7 +128,7 @@ The server is configured via a JSON file. See `cmd/server/config.example.json` f
 {
     "bind_address": ":443",
     "sni": "www.microsoft.com",
-    "transport": "tls",
+    "transport": "tls", // Options: "tls" (TCP only), "quic" (UDP only), "any" (Dual stack)
     "camouflage": {
         "enabled": true,
         "target": "https://www.microsoft.com"

@@ -63,6 +63,8 @@ func (s *Server) Start() error {
 	case "tls":
 		return s.startTLS()
 	case "quic":
+		return s.startQUIC()
+	case "any":
 		go func() {
 			if err := s.startTLSFallback(); err != nil {
 				log.Printf("[Server] TCP fallback listener failed: %v", err)
@@ -475,7 +477,8 @@ func (s *Server) handleQUICConnection(conn *quic.Conn) {
 		writer := NewFrameWriter(authStream)
 		writer.WriteTypedFrame(EncodeAuthResponse(AuthStatusDenied, nil))
 		writer.Flush()
-		authStream.Close()
+
+		conn.CloseWithError(quic.ApplicationErrorCode(AuthStatusDenied), "Authentication failed")
 		return
 	}
 

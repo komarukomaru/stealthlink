@@ -1,7 +1,9 @@
 package transport
 
 import (
+	"fmt"
 	"net"
+	"syscall"
 )
 
 type PeekingConn struct {
@@ -56,4 +58,31 @@ func (c *ReplayProtectedPacketConn) ReadFrom(p []byte) (n int, addr net.Addr, er
 		}
 		return
 	}
+}
+
+func (c *ReplayProtectedPacketConn) SetReadBuffer(bytes int) error {
+	if sc, ok := c.PacketConn.(interface {
+		SetReadBuffer(int) error
+	}); ok {
+		return sc.SetReadBuffer(bytes)
+	}
+	return nil
+}
+
+func (c *ReplayProtectedPacketConn) SetWriteBuffer(bytes int) error {
+	if sc, ok := c.PacketConn.(interface {
+		SetWriteBuffer(int) error
+	}); ok {
+		return sc.SetWriteBuffer(bytes)
+	}
+	return nil
+}
+
+func (c *ReplayProtectedPacketConn) SyscallConn() (syscall.RawConn, error) {
+	if sc, ok := c.PacketConn.(interface {
+		SyscallConn() (syscall.RawConn, error)
+	}); ok {
+		return sc.SyscallConn()
+	}
+	return nil, fmt.Errorf("SyscallConn not supported")
 }
