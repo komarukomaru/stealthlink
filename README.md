@@ -1,3 +1,5 @@
+# The project hasn't been abandoned, I'm just busy with something else right now
+
 # StealthLink Protocol
 
 StealthLink is a high-performance, censorship-resistant VPN protocol designed to provide secure and fast connectivity even in restrictive network environments. It leverages modern transport standards like TLS 1.3 and QUIC (HTTP/3) combined with advanced stealth techniques to bypass Deep Packet Inspection (DPI).
