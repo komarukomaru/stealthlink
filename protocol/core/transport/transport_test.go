@@ -133,10 +133,13 @@ func TestDataFrame(t *testing.T) {
 
 func TestUDPFrame(t *testing.T) {
 	data := []byte("udp payload")
-	frame := EncodeUDPFrame(AddrIPv4, "8.8.8.8", 53, data)
+	frame := EncodeUDPFrame(7, AddrIPv4, "8.8.8.8", 53, data)
 	udp, err := DecodeUDPFrame(frame.Payload)
 	if err != nil {
 		t.Fatalf("decode failed: %v", err)
+	}
+	if udp.AssocID != 7 {
+		t.Fatalf("assoc id: got %d", udp.AssocID)
 	}
 	if udp.Addr != "8.8.8.8" {
 		t.Fatalf("addr: got %q", udp.Addr)
@@ -565,5 +568,51 @@ func TestCloseFrame(t *testing.T) {
 	sid := binary.BigEndian.Uint16(frame.Payload)
 	if sid != 42 {
 		t.Fatalf("stream id: %d", sid)
+	}
+}
+
+func TestUDPCloseFrame(t *testing.T) {
+	frame := EncodeUDPCloseFrame(17)
+	if frame.Type != FrameUDPClose {
+		t.Fatalf("wrong type")
+	}
+
+	assocID, err := DecodeUDPCloseFrame(frame.Payload)
+	if err != nil {
+		t.Fatalf("decode failed: %v", err)
+	}
+	if assocID != 17 {
+		t.Fatalf("assoc id: got %d", assocID)
+	}
+}
+
+func TestSOCKSUDPDatagram(t *testing.T) {
+	data := []byte("voice payload")
+	packet := EncodeSOCKSUDPDatagram(AddrDomain, "discord.media", 50000, data)
+
+	addrType, addr, port, decodedData, err := DecodeSOCKSUDPDatagram(packet)
+	if err != nil {
+		t.Fatalf("decode failed: %v", err)
+	}
+	if addrType != AddrDomain {
+		t.Fatalf("addr type: got %d", addrType)
+	}
+	if addr != "discord.media" {
+		t.Fatalf("addr: got %q", addr)
+	}
+	if port != 50000 {
+		t.Fatalf("port: got %d", port)
+	}
+	if !bytes.Equal(decodedData, data) {
+		t.Fatalf("data mismatch")
+	}
+}
+
+func TestDecodeSOCKSUDPDatagramRejectsFragments(t *testing.T) {
+	packet := EncodeSOCKSUDPDatagram(AddrIPv4, "1.1.1.1", 53, []byte("dns"))
+	packet[2] = 0x01
+
+	if _, _, _, _, err := DecodeSOCKSUDPDatagram(packet); err == nil {
+		t.Fatal("expected fragmented packet to be rejected")
 	}
 }

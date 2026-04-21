@@ -18,6 +18,7 @@ import (
 	"log"
 	"math/big"
 	"net"
+	"strconv"
 	"sync"
 	"time"
 
@@ -217,6 +218,10 @@ func (s *Server) handleTUNSession(rw io.ReadWriter, session *AuthSession) {
 	writer := NewFrameWriter(rw)
 	defer writer.Close()
 
+	udpAssocMu := &sync.Mutex{}
+	udpAssociations := make(map[uint16]*net.UDPConn)
+	defer s.closeUDPAssociations(udpAssociations, udpAssocMu)
+
 	s.firewall.OnConnect(session.User.ID)
 	defer s.firewall.OnDisconnect(session.User.ID)
 
@@ -233,6 +238,15 @@ func (s *Server) handleTUNSession(rw io.ReadWriter, session *AuthSession) {
 			payload := make([]byte, len(frame.Payload))
 			copy(payload, frame.Payload)
 			go s.handleFrameConnect(writer, Frame{Type: frame.Type, Payload: payload}, session)
+		case FrameUDP:
+			payload := make([]byte, len(frame.Payload))
+			copy(payload, frame.Payload)
+			go s.handleFrameUDP(writer, Frame{Type: frame.Type, Payload: payload}, session, udpAssocMu, udpAssociations)
+		case FrameUDPClose:
+			assocID, decodeErr := DecodeUDPCloseFrame(frame.Payload)
+			if decodeErr == nil {
+				s.closeUDPAssociation(assocID, udpAssociations, udpAssocMu)
+			}
 		case FrameClose:
 		case FramePadding:
 		}
@@ -324,6 +338,116 @@ func (s *Server) handleFrameConnect(writer *FrameWriter, frame Frame, session *A
 			}
 		}
 	}()
+}
+
+func (s *Server) handleFrameUDP(
+	writer *FrameWriter,
+	frame Frame,
+	session *AuthSession,
+	udpAssocMu *sync.Mutex,
+	udpAssociations map[uint16]*net.UDPConn,
+) {
+	payload, err := DecodeUDPFrame(frame.Payload)
+	if err != nil {
+		return
+	}
+
+	if !s.firewall.CheckConnection(session.User.ID, payload.Addr, payload.Port, session.User) {
+		return
+	}
+
+	udpConn, err := s.getOrCreateUDPAssociation(payload.AssocID, writer, session, udpAssocMu, udpAssociations)
+	if err != nil {
+		return
+	}
+
+	targetAddr, err := net.ResolveUDPAddr("udp", net.JoinHostPort(payload.Addr, strconv.Itoa(int(payload.Port))))
+	if err != nil {
+		return
+	}
+
+	s.firewall.TrackBandwidth(session.User.ID, int64(len(payload.Data)))
+	_, _ = udpConn.WriteToUDP(payload.Data, targetAddr)
+}
+
+func (s *Server) getOrCreateUDPAssociation(
+	assocID uint16,
+	writer *FrameWriter,
+	session *AuthSession,
+	udpAssocMu *sync.Mutex,
+	udpAssociations map[uint16]*net.UDPConn,
+) (*net.UDPConn, error) {
+	udpAssocMu.Lock()
+	if conn := udpAssociations[assocID]; conn != nil {
+		udpAssocMu.Unlock()
+		return conn, nil
+	}
+	udpAssocMu.Unlock()
+
+	udpConn, err := net.ListenUDP("udp", nil)
+	if err != nil {
+		return nil, err
+	}
+	TuneUDPConn(udpConn)
+
+	udpAssocMu.Lock()
+	if existing := udpAssociations[assocID]; existing != nil {
+		udpAssocMu.Unlock()
+		udpConn.Close()
+		return existing, nil
+	}
+	udpAssociations[assocID] = udpConn
+	udpAssocMu.Unlock()
+
+	go s.relayUDPResponses(assocID, udpConn, writer, session)
+	return udpConn, nil
+}
+
+func (s *Server) relayUDPResponses(assocID uint16, udpConn *net.UDPConn, writer *FrameWriter, session *AuthSession) {
+	buf := make([]byte, MaxPacketSize)
+	for {
+		n, srcAddr, err := udpConn.ReadFromUDP(buf)
+		if err != nil {
+			return
+		}
+		if n == 0 {
+			continue
+		}
+
+		addrType := AddrIPv6
+		addr := srcAddr.IP.String()
+		if ipv4 := srcAddr.IP.To4(); ipv4 != nil {
+			addrType = AddrIPv4
+			addr = ipv4.String()
+		}
+
+		s.firewall.TrackBandwidth(session.User.ID, int64(n))
+		if err := writer.WriteTypedFrame(EncodeUDPFrame(assocID, addrType, addr, uint16(srcAddr.Port), buf[:n])); err != nil {
+			return
+		}
+		if err := writer.Flush(); err != nil {
+			return
+		}
+	}
+}
+
+func (s *Server) closeUDPAssociation(assocID uint16, udpAssociations map[uint16]*net.UDPConn, udpAssocMu *sync.Mutex) {
+	udpAssocMu.Lock()
+	conn := udpAssociations[assocID]
+	delete(udpAssociations, assocID)
+	udpAssocMu.Unlock()
+	if conn != nil {
+		conn.Close()
+	}
+}
+
+func (s *Server) closeUDPAssociations(udpAssociations map[uint16]*net.UDPConn, udpAssocMu *sync.Mutex) {
+	udpAssocMu.Lock()
+	defer udpAssocMu.Unlock()
+	for assocID, conn := range udpAssociations {
+		delete(udpAssociations, assocID)
+		conn.Close()
+	}
 }
 
 func (s *Server) handleDirectConnection(conn net.Conn, session *AuthSession) {

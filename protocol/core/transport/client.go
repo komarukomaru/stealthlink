@@ -48,6 +48,12 @@ type Client struct {
 	transportCloser io.Closer
 	writer          *FrameWriter
 	reader          *FrameReader
+	activeServer    *ServerEntry
+	activePSK       string
+	frameLoopActive bool
+	frameInbox      chan Frame
+	udpHandlers     map[uint16]chan UDPPayload
+	nextUDPAssocID  uint16
 	stopChan        chan struct{}
 	connected       bool
 }
@@ -64,10 +70,13 @@ func NewClient(config ClientConfig) *Client {
 	}
 
 	c := &Client{
-		config:   config,
-		proxy:    NewSOCKSProxy(config.SOCKSAddr),
-		stopChan: make(chan struct{}),
+		config:      config,
+		proxy:       NewSOCKSProxy(config.SOCKSAddr),
+		frameInbox:  make(chan Frame, 128),
+		udpHandlers: make(map[uint16]chan UDPPayload),
+		stopChan:    make(chan struct{}),
 	}
+	c.proxy.SetUDPOpener(c.OpenUDPAssociation)
 
 	if config.HTTPAddr != "" {
 		c.httpProxy = NewHTTPProxy(config.HTTPAddr, config.SOCKSAddr)
@@ -250,7 +259,7 @@ func (c *Client) connectCandidate(server *ServerEntry, persistent bool) error {
 			}
 			return nil
 		}
-		return c.connectTLSForTUN(server, psk)
+		return c.connectTLSPersistent(server, psk)
 	}
 
 	return c.connect(server)
@@ -292,6 +301,7 @@ func (c *Client) connectTLS(server *ServerEntry, psk string) error {
 	})
 
 	c.mu.Lock()
+	c.setActiveServerLocked(server, psk)
 	c.connected = true
 	c.mu.Unlock()
 
@@ -306,7 +316,7 @@ func (c *Client) probeTLSPath(serverAddr, sni, fingerprint string) error {
 	return conn.Close()
 }
 
-func (c *Client) connectTLSForTUN(server *ServerEntry, psk string) error {
+func (c *Client) connectTLSPersistent(server *ServerEntry, psk string) error {
 	sni := server.SNI
 	if sni == "" {
 		sni = c.config.SNI
@@ -321,7 +331,7 @@ func (c *Client) connectTLSForTUN(server *ServerEntry, psk string) error {
 		secretPath = c.config.SecretPath
 	}
 
-	log.Printf("[Client] TLS TUN persistent mode to %s (SNI: %s)", server.Address, sni)
+	log.Printf("[Client] TLS persistent mode to %s (SNI: %s)", server.Address, sni)
 
 	fingerprint := server.Fingerprint
 	if fingerprint == "" {
@@ -378,23 +388,24 @@ func (c *Client) connectTLSForTUN(server *ServerEntry, psk string) error {
 	conn.SetDeadline(time.Now().Add(15 * time.Second))
 	if _, err := io.ReadFull(conn, status); err != nil {
 		conn.Close()
-		return fmt.Errorf("TUN auth response failed: %w", err)
+		return fmt.Errorf("persistent auth response failed: %w", err)
 	}
 	conn.SetDeadline(time.Time{})
 
 	if status[0] != AuthStatusOK {
 		conn.Close()
-		return fmt.Errorf("TUN auth denied: status=%d", status[0])
+		return fmt.Errorf("persistent auth denied: status=%d", status[0])
 	}
 
 	c.mu.Lock()
+	c.setActiveServerLocked(server, psk)
 	c.transportCloser = conn
 	c.writer = NewFrameWriter(conn)
 	c.reader = NewFrameReader(conn)
 	c.connected = true
 	c.mu.Unlock()
 
-	log.Printf("[Client] TUN persistent connection established")
+	log.Printf("[Client] Persistent control channel established")
 
 	// Capture variables for the closure to avoid any potential race if server pointer changes (though unlikely here)
 	// 'fingerprint' is already resolved at the top of the function
@@ -502,6 +513,7 @@ func (c *Client) connectQUIC(server *ServerEntry, psk string) error {
 	log.Printf("[Client] QUIC authenticated successfully")
 
 	c.mu.Lock()
+	c.setActiveServerLocked(server, psk)
 	c.quicConn = conn
 	c.quicTransport = tr
 	c.connected = true
@@ -519,10 +531,15 @@ func (c *Client) EnsurePersistentChannel() error {
 		return nil
 	}
 	conn := c.quicConn
+	server := c.activeServer
+	psk := c.activePSK
 	c.mu.Unlock()
 
 	if conn == nil {
-		return fmt.Errorf("persistent channel unavailable")
+		if server == nil || psk == "" {
+			return fmt.Errorf("persistent channel unavailable")
+		}
+		return c.connectTLSPersistent(server, psk)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -653,11 +670,18 @@ func (c *Client) resetTransportState() {
 	closer := c.transportCloser
 	quicConn := c.quicConn
 	quicTransport := c.quicTransport
+	udpHandlers := c.udpHandlers
+	frameInbox := c.frameInbox
 	c.writer = nil
 	c.reader = nil
 	c.transportCloser = nil
 	c.quicConn = nil
 	c.quicTransport = nil
+	c.activeServer = nil
+	c.activePSK = ""
+	c.frameLoopActive = false
+	c.udpHandlers = make(map[uint16]chan UDPPayload)
+	c.frameInbox = make(chan Frame, 128)
 	c.connected = false
 	c.mu.Unlock()
 
@@ -672,6 +696,12 @@ func (c *Client) resetTransportState() {
 	}
 	if quicTransport != nil {
 		quicTransport.Close()
+	}
+	for _, ch := range udpHandlers {
+		close(ch)
+	}
+	if frameInbox != nil {
+		close(frameInbox)
 	}
 }
 
@@ -705,22 +735,78 @@ func (c *Client) WriteIPFrame(data []byte) error {
 }
 
 func (c *Client) ReadFrame() (Frame, error) {
-	if err := c.EnsurePersistentChannel(); err != nil {
-		c.mu.Lock()
-		reader := c.reader
+	c.mu.Lock()
+	if c.frameLoopActive {
+		inbox := c.frameInbox
 		c.mu.Unlock()
-		if reader == nil {
-			return Frame{}, err
+		frame, ok := <-inbox
+		if !ok {
+			return Frame{}, fmt.Errorf("not connected")
+		}
+		return frame, nil
+	}
+	reader := c.reader
+	c.mu.Unlock()
+
+	if reader == nil {
+		if err := c.EnsurePersistentChannel(); err != nil {
+			c.mu.Lock()
+			reader = c.reader
+			c.mu.Unlock()
+			if reader == nil {
+				return Frame{}, err
+			}
+		} else {
+			c.mu.Lock()
+			reader = c.reader
+			c.mu.Unlock()
 		}
 	}
 
-	c.mu.Lock()
-	reader := c.reader
-	c.mu.Unlock()
 	if reader == nil {
 		return Frame{}, fmt.Errorf("not connected")
 	}
 	return reader.ReadTypedFrame()
+}
+
+func (c *Client) setActiveServerLocked(server *ServerEntry, psk string) {
+	if server == nil {
+		c.activeServer = nil
+		c.activePSK = ""
+		return
+	}
+
+	serverCopy := *server
+	c.activeServer = &serverCopy
+	c.activePSK = psk
+}
+
+func (c *Client) dropPersistentChannel() {
+	c.mu.Lock()
+	writer := c.writer
+	closer := c.transportCloser
+	udpHandlers := c.udpHandlers
+	frameInbox := c.frameInbox
+	c.writer = nil
+	c.reader = nil
+	c.transportCloser = nil
+	c.frameLoopActive = false
+	c.udpHandlers = make(map[uint16]chan UDPPayload)
+	c.frameInbox = make(chan Frame, 128)
+	c.mu.Unlock()
+
+	if writer != nil {
+		writer.Close()
+	}
+	if closer != nil {
+		closer.Close()
+	}
+	for _, ch := range udpHandlers {
+		close(ch)
+	}
+	if frameInbox != nil {
+		close(frameInbox)
+	}
 }
 
 func min(a, b int) int {
@@ -739,6 +825,7 @@ func shouldRetryOtherTransports(err error) bool {
 	terminalMarkers := []string{
 		"auth denied",
 		"authentication denied",
+		"persistent auth denied",
 		"tunnel auth denied",
 		"tun auth denied",
 		"invalid psk",

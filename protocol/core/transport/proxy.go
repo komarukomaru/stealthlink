@@ -20,10 +20,11 @@ import (
 type SOCKSProxy struct {
 	ListenAddr string
 
-	mu       sync.RWMutex
-	dialer   func(addrType byte, addr string, port uint16) (net.Conn, error)
-	quicConn *quic.Conn
-	stopChan chan struct{}
+	mu        sync.RWMutex
+	dialer    func(addrType byte, addr string, port uint16) (net.Conn, error)
+	quicConn  *quic.Conn
+	udpOpener func() (*UDPAssociation, error)
+	stopChan  chan struct{}
 }
 
 func NewSOCKSProxy(listenAddr string) *SOCKSProxy {
@@ -44,6 +45,12 @@ func (sp *SOCKSProxy) SetQUIC(conn *quic.Conn) {
 	sp.mu.Lock()
 	sp.quicConn = conn
 	sp.dialer = nil
+	sp.mu.Unlock()
+}
+
+func (sp *SOCKSProxy) SetUDPOpener(fn func() (*UDPAssociation, error)) {
+	sp.mu.Lock()
+	sp.udpOpener = fn
 	sp.mu.Unlock()
 }
 
@@ -83,58 +90,67 @@ func (sp *SOCKSProxy) handleSOCKS(conn net.Conn) {
 
 	conn.SetDeadline(time.Now().Add(10 * time.Second))
 
-	buf := make([]byte, 258)
-	n, err := conn.Read(buf)
-	if err != nil || n < 3 {
+	header := make([]byte, 2)
+	if _, err := io.ReadFull(conn, header); err != nil {
+		return
+	}
+	if header[0] != 0x05 {
 		return
 	}
 
-	if buf[0] != 0x05 {
+	methodCount := int(header[1])
+	if methodCount == 0 {
+		return
+	}
+
+	methods := make([]byte, methodCount)
+	if _, err := io.ReadFull(conn, methods); err != nil {
+		return
+	}
+
+	supportsNoAuth := false
+	for _, method := range methods {
+		if method == 0x00 {
+			supportsNoAuth = true
+			break
+		}
+	}
+	if !supportsNoAuth {
+		conn.Write([]byte{0x05, 0xFF})
 		return
 	}
 
 	conn.Write([]byte{0x05, 0x00})
 
 	conn.SetDeadline(time.Now().Add(10 * time.Second))
-	n, err = conn.Read(buf)
-	if err != nil || n < 7 {
+	reqHeader := make([]byte, 4)
+	if _, err := io.ReadFull(conn, reqHeader); err != nil {
 		return
 	}
 
-	if buf[0] != 0x05 || buf[1] != 0x01 {
+	if reqHeader[0] != 0x05 {
 		conn.Write([]byte{0x05, 0x07, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
 		return
 	}
 
-	var addrType byte
-	var addr string
-	var port uint16
-
-	switch buf[3] {
-	case 0x01:
-		if n < 10 {
-			return
-		}
-		addrType = AddrIPv4
-		addr = net.IP(buf[4:8]).String()
-		port = binary.BigEndian.Uint16(buf[8:10])
-	case 0x03:
-		dLen := int(buf[4])
-		if n < 5+dLen+2 {
-			return
-		}
-		addrType = AddrDomain
-		addr = string(buf[5 : 5+dLen])
-		port = binary.BigEndian.Uint16(buf[5+dLen : 7+dLen])
-	case 0x04:
-		if n < 22 {
-			return
-		}
-		addrType = AddrIPv6
-		addr = net.IP(buf[4:20]).String()
-		port = binary.BigEndian.Uint16(buf[20:22])
-	default:
+	cmd := reqHeader[1]
+	addrType, addr, port, err := ReadAddressHeaderWithFirstByte(reqHeader[3], conn)
+	if err != nil {
 		conn.Write([]byte{0x05, 0x08, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
+		return
+	}
+
+	switch cmd {
+	case 0x01:
+	case 0x03:
+		_ = addrType
+		_ = addr
+		_ = port
+		sp.handleSOCKSUDPAssociate(conn)
+		return
+	default:
+		log.Printf("[SOCKS5] Unsupported command %s (%d)", socksCommandName(cmd), cmd)
+		conn.Write([]byte{0x05, 0x07, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
 		return
 	}
 
@@ -216,12 +232,171 @@ func (sp *SOCKSProxy) handleSOCKSQUIC(conn net.Conn, qc *quic.Conn, addrType byt
 	<-done
 }
 
+func (sp *SOCKSProxy) handleSOCKSUDPAssociate(conn net.Conn) {
+	sp.mu.RLock()
+	udpOpener := sp.udpOpener
+	sp.mu.RUnlock()
+
+	if udpOpener == nil {
+		conn.Write([]byte{0x05, 0x07, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
+		return
+	}
+
+	assoc, err := udpOpener()
+	if err != nil {
+		log.Printf("[SOCKS5] UDP association setup failed: %v", err)
+		conn.Write([]byte{0x05, 0x01, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
+		return
+	}
+	defer assoc.Close()
+
+	udpAddr, err := net.ResolveUDPAddr("udp", "127.0.0.1:0")
+	if err != nil {
+		conn.Write([]byte{0x05, 0x01, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
+		return
+	}
+
+	udpConn, err := net.ListenUDP("udp", udpAddr)
+	if err != nil {
+		log.Printf("[SOCKS5] UDP relay bind failed: %v", err)
+		conn.Write([]byte{0x05, 0x01, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
+		return
+	}
+	defer udpConn.Close()
+
+	TuneUDPConn(udpConn)
+
+	bindIP := net.ParseIP("127.0.0.1").To4()
+	port := uint16(udpConn.LocalAddr().(*net.UDPAddr).Port)
+	reply := []byte{0x05, 0x00, 0x00, 0x01}
+	reply = append(reply, bindIP...)
+	reply = append(reply, 0, 0)
+	binary.BigEndian.PutUint16(reply[len(reply)-2:], port)
+	if _, err := conn.Write(reply); err != nil {
+		return
+	}
+	conn.SetDeadline(time.Time{})
+
+	done := make(chan struct{})
+	var doneOnce sync.Once
+	var clientAddrMu sync.RWMutex
+	var clientAddr *net.UDPAddr
+
+	go func() {
+		_, _ = io.Copy(io.Discard, conn)
+		doneOnce.Do(func() { close(done) })
+	}()
+
+	go func() {
+		for {
+			select {
+			case <-done:
+				return
+			case payload, ok := <-assoc.Receive():
+				if !ok {
+					return
+				}
+
+				clientAddrMu.RLock()
+				targetAddr := clientAddr
+				clientAddrMu.RUnlock()
+				if targetAddr == nil {
+					continue
+				}
+
+				packet := EncodeSOCKSUDPDatagram(payload.AddrType, payload.Addr, payload.Port, payload.Data)
+				if _, err := udpConn.WriteToUDP(packet, targetAddr); err != nil {
+					doneOnce.Do(func() { close(done) })
+					return
+				}
+			}
+		}
+	}()
+
+	buf := make([]byte, MaxPacketSize+512)
+	for {
+		select {
+		case <-done:
+			return
+		default:
+		}
+
+		udpConn.SetReadDeadline(time.Now().Add(2 * time.Second))
+		n, srcAddr, err := udpConn.ReadFromUDP(buf)
+		if err != nil {
+			if ne, ok := err.(net.Error); ok && ne.Timeout() {
+				continue
+			}
+			break
+		}
+
+		clientAddrMu.Lock()
+		if clientAddr == nil {
+			addrCopy := *srcAddr
+			clientAddr = &addrCopy
+		}
+		knownClientAddr := clientAddr
+		clientAddrMu.Unlock()
+
+		if knownClientAddr != nil && (!srcAddr.IP.Equal(knownClientAddr.IP) || srcAddr.Port != knownClientAddr.Port) {
+			continue
+		}
+
+		addrType, addr, dstPort, data, parseErr := DecodeSOCKSUDPDatagram(buf[:n])
+		if parseErr != nil {
+			continue
+		}
+
+		if err := assoc.Send(addrType, addr, dstPort, data); err != nil {
+			log.Printf("[SOCKS5] UDP relay send failed: %v", err)
+			break
+		}
+	}
+
+	doneOnce.Do(func() { close(done) })
+}
+
 func (sp *SOCKSProxy) Stop() {
 	select {
 	case <-sp.stopChan:
 	default:
 		close(sp.stopChan)
 	}
+}
+
+func socksCommandName(cmd byte) string {
+	switch cmd {
+	case 0x01:
+		return "connect"
+	case 0x02:
+		return "bind"
+	case 0x03:
+		return "udp associate"
+	default:
+		return "unknown"
+	}
+}
+
+func EncodeSOCKSUDPDatagram(addrType byte, addr string, port uint16, data []byte) []byte {
+	packet := []byte{0x00, 0x00, 0x00}
+	packet = append(packet, EncodeAddress(addrType, addr, port)...)
+	packet = append(packet, data...)
+	return packet
+}
+
+func DecodeSOCKSUDPDatagram(packet []byte) (addrType byte, addr string, port uint16, data []byte, err error) {
+	if len(packet) < 4 {
+		return 0, "", 0, nil, fmt.Errorf("udp packet too short")
+	}
+	if packet[0] != 0x00 || packet[1] != 0x00 {
+		return 0, "", 0, nil, fmt.Errorf("invalid udp reserved field")
+	}
+	if packet[2] != 0x00 {
+		return 0, "", 0, nil, fmt.Errorf("fragmented udp packets are unsupported")
+	}
+
+	addrType, addr, port, data, err = DecodeAddress(packet[3:])
+	return
 }
 
 type HTTPProxy struct {

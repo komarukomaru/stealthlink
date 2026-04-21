@@ -25,8 +25,6 @@ func main() {
 	subURL := flag.String("sub", "", "Subscription URL (stealthlink://...)")
 	noPadding := flag.Bool("no-padding", false, "Disable traffic padding")
 	noStealth := flag.Bool("no-stealth", false, "Disable stealth features")
-	tunMode := flag.Bool("tun", false, "Use TUN device for full system VPN")
-	tunCIDR := flag.String("tun-cidr", "10.0.0.2/24", "TUN interface CIDR")
 	fingerprint := flag.String("fingerprint", "", "uTLS fingerprint (chrome, firefox, ios, android, 360, qq, random)") // https://github.com/komarukomaru/stealthlink/issues/2
 	flag.Parse()
 
@@ -86,30 +84,14 @@ func main() {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
-	if *tunMode {
-		log.Printf("Mode:       TUN (%s)", *tunCIDR)
-		tunClient := transport.NewTunClient(config, *tunCIDR)
+	go func() {
+		<-sigCh
+		log.Println("Shutting down...")
+		client.Stop()
+		os.Exit(0)
+	}()
 
-		go func() {
-			<-sigCh
-			log.Println("Shutting down...")
-			tunClient.Stop()
-			os.Exit(0)
-		}()
-
-		if err := tunClient.Start(); err != nil {
-			log.Fatalf("TUN client failed: %v", err)
-		}
-	} else {
-		go func() {
-			<-sigCh
-			log.Println("Shutting down...")
-			client.Stop()
-			os.Exit(0)
-		}()
-
-		if err := client.Start(); err != nil {
-			log.Fatalf("Client failed: %v", err)
-		}
+	if err := client.Start(); err != nil {
+		log.Fatalf("Client failed: %v", err)
 	}
 }

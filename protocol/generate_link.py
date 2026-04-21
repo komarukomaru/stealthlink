@@ -28,8 +28,8 @@ if __name__ == "__main__":
     my_servers = [
         {
             "address": "1.2.3.4:443",
-            "psk": "your-secret-key-here",
-            "sni": "google.com",
+            "psk": "CHANGE-ME-RANDOM-STRING-HERE",
+            "sni": "microsoft.com",
             "transport": "tls", # or "quic"
             "weight": 10
         },

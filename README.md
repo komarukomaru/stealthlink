@@ -23,9 +23,7 @@ StealthLink is a high-performance, censorship-resistant VPN protocol designed to
 ### User & Network Management
 - **Multi-User Support**: Built-in authentication with user-specific bandwidth limits and expiration dates.
 - **Firewall & ACL**: Granular control over allowed ports and destination ranges per user.
-- **Smart Routing**:
-  - **VPN Mode**: Full system tunnel using TUN interface (WireGuard/water based).
-  - **Proxy Mode**: SOCKS5 and HTTP proxy support.
+- **Proxy Mode**: SOCKS5 and HTTP proxy support.
 
 ## Project Structure
 
@@ -94,13 +92,7 @@ The client is configured primarily via command-line flags. It does not currently
    ./client -sub "stealthlink://..."
    ```
 
-3. **VPN Mode (TUN Interface)**:
-   Enable full system VPN mode (requires Administrator/Root privileges):
-   ```bash
-   ./client -server "1.2.3.4:443" -psk "YOUR-PSK" -tun
-   ```
-
-4. **Proxy Mode**:
+3. **Proxy Mode**:
    By default, the client starts a SOCKS5 proxy on `127.0.0.1:1080`.
    You can change this or add an HTTP proxy:
    ```bash

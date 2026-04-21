@@ -27,6 +27,7 @@ const (
 	FrameUDP      byte = 0x07
 	FrameConfig   byte = 0x08
 	FrameIP       byte = 0x09
+	FrameUDPClose byte = 0x0A
 
 	AddrIPv4   byte = 0x01
 	AddrDomain byte = 0x03
@@ -51,6 +52,7 @@ type DataPayload struct {
 }
 
 type UDPPayload struct {
+	AssocID  uint16
 	AddrType byte
 	Addr     string
 	Port     uint16
@@ -173,23 +175,44 @@ func EncodeCloseFrame(streamID uint16) Frame {
 	return Frame{Type: FrameClose, Payload: payload}
 }
 
-func EncodeUDPFrame(addrType byte, addr string, port uint16, data []byte) Frame {
-	payload := EncodeAddress(addrType, addr, port)
+func EncodeUDPFrame(assocID uint16, addrType byte, addr string, port uint16, data []byte) Frame {
+	payload := make([]byte, 2)
+	binary.BigEndian.PutUint16(payload, assocID)
+	payload = append(payload, EncodeAddress(addrType, addr, port)...)
 	payload = append(payload, data...)
 	return Frame{Type: FrameUDP, Payload: payload}
 }
 
 func DecodeUDPFrame(payload []byte) (UDPPayload, error) {
-	addrType, addr, port, rest, err := DecodeAddress(payload)
+	if len(payload) < 2 {
+		return UDPPayload{}, fmt.Errorf("udp frame too short")
+	}
+
+	assocID := binary.BigEndian.Uint16(payload[:2])
+	addrType, addr, port, rest, err := DecodeAddress(payload[2:])
 	if err != nil {
 		return UDPPayload{}, err
 	}
 	return UDPPayload{
+		AssocID:  assocID,
 		AddrType: addrType,
 		Addr:     addr,
 		Port:     port,
 		Data:     rest,
 	}, nil
+}
+
+func EncodeUDPCloseFrame(assocID uint16) Frame {
+	payload := make([]byte, 2)
+	binary.BigEndian.PutUint16(payload, assocID)
+	return Frame{Type: FrameUDPClose, Payload: payload}
+}
+
+func DecodeUDPCloseFrame(payload []byte) (uint16, error) {
+	if len(payload) != 2 {
+		return 0, fmt.Errorf("udp close frame length mismatch: %d", len(payload))
+	}
+	return binary.BigEndian.Uint16(payload), nil
 }
 
 var bufferPool = sync.Pool{

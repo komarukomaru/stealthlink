@@ -64,6 +64,14 @@ func TuneTCPConn(conn net.Conn) {
 	}
 }
 
+func TuneUDPConn(conn *net.UDPConn) {
+	if conn == nil {
+		return
+	}
+	conn.SetReadBuffer(4 * 1024 * 1024)
+	conn.SetWriteBuffer(4 * 1024 * 1024)
+}
+
 func DialTarget(addr string, port uint16, timeout time.Duration) (net.Conn, error) {
 	target := net.JoinHostPort(addr, strconv.Itoa(int(port)))
 	conn, err := net.DialTimeout("tcp", target, timeout)
