@@ -219,6 +219,16 @@ func (p *PooledPacket) Release() {
 	}
 }
 
+type PooledFrame struct {
+	Type    byte
+	Payload []byte
+	pkt     PooledPacket
+}
+
+func (pf *PooledFrame) Release() {
+	pf.pkt.Release()
+}
+
 type FrameWriter struct {
 	w            io.Writer
 	mu           sync.Mutex
@@ -410,22 +420,40 @@ func (fr *FrameReader) ReadFrame() (PooledPacket, error) {
 }
 
 func (fr *FrameReader) ReadTypedFrame() (Frame, error) {
-	pkt, err := fr.ReadFrame()
+	pf, err := fr.ReadTypedFramePooled()
 	if err != nil {
 		return Frame{}, err
 	}
-	defer pkt.Release()
+	defer pf.Release()
 
-	if len(pkt.Data) < 1 {
+	if pf.pkt.Buf == nil && pf.Payload == nil {
 		return Frame{}, nil
 	}
 
-	data := make([]byte, len(pkt.Data)-1)
-	copy(data, pkt.Data[1:])
+	data := make([]byte, len(pf.Payload))
+	copy(data, pf.Payload)
 
 	return Frame{
-		Type:    pkt.Data[0],
+		Type:    pf.Type,
 		Payload: data,
+	}, nil
+}
+
+func (fr *FrameReader) ReadTypedFramePooled() (PooledFrame, error) {
+	pkt, err := fr.ReadFrame()
+	if err != nil {
+		return PooledFrame{}, err
+	}
+
+	if len(pkt.Data) < 1 {
+		pkt.Release()
+		return PooledFrame{}, nil
+	}
+
+	return PooledFrame{
+		Type:    pkt.Data[0],
+		Payload: pkt.Data[1:],
+		pkt:     pkt,
 	}, nil
 }
 

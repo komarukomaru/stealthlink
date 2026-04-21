@@ -14,6 +14,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -41,12 +42,14 @@ type Client struct {
 	httpProxy *HTTPProxy
 	selector  *ServerSelector
 
-	mu        sync.Mutex
-	quicConn  *quic.Conn
-	writer    *FrameWriter
-	reader    *FrameReader
-	stopChan  chan struct{}
-	connected bool
+	mu              sync.Mutex
+	quicConn        *quic.Conn
+	quicTransport   io.Closer
+	transportCloser io.Closer
+	writer          *FrameWriter
+	reader          *FrameReader
+	stopChan        chan struct{}
+	connected       bool
 }
 
 func NewClient(config ClientConfig) *Client {
@@ -72,6 +75,8 @@ func NewClient(config ClientConfig) *Client {
 
 	if config.Subscription != nil && len(config.Subscription.Servers) > 0 {
 		c.selector = NewServerSelector(config.Subscription.Servers)
+	} else if config.ServerAddr != "" {
+		c.selector = NewServerSelector([]ServerEntry{c.defaultServerEntry()})
 	}
 
 	return c
@@ -94,18 +99,25 @@ func (c *Client) Start() error {
 }
 
 func (c *Client) connectWithRetry() error {
+	return c.connectLoop(false)
+}
+
+func (c *Client) connectPersistentWithRetry() error {
+	return c.connectLoop(true)
+}
+
+func (c *Client) connectLoop(persistent bool) error {
 	backoff := 500 * time.Millisecond
 	maxBackoff := 30 * time.Second
 
 	for {
-		server := c.resolveServer()
-
-		err := c.connect(server)
+		err := c.tryConnectCandidates(persistent)
 		if err == nil {
 			backoff = 500 * time.Millisecond
 			c.runLoop()
 		} else {
 			log.Printf("[Client] Connection failed: %v", err)
+			c.resetTransportState()
 		}
 
 		select {
@@ -123,15 +135,8 @@ func (c *Client) connectWithRetry() error {
 	}
 }
 
-func (c *Client) resolveServer() *ServerEntry {
-	if c.selector != nil {
-		best := c.selector.SelectBestServer(5 * time.Second)
-		if best != nil {
-			return best
-		}
-	}
-
-	return &ServerEntry{
+func (c *Client) defaultServerEntry() ServerEntry {
+	return ServerEntry{
 		Address:     c.config.ServerAddr,
 		PSK:         c.config.PSK,
 		SNI:         c.config.SNI,
@@ -139,6 +144,73 @@ func (c *Client) resolveServer() *ServerEntry {
 		SecretPath:  c.config.SecretPath,
 		Fingerprint: c.config.Fingerprint,
 	}
+}
+
+func (c *Client) resolveAttemptGroups() []serverAttemptGroup {
+	if c.selector != nil {
+		groups := c.selector.RankServerGroups(c.config.Transport)
+		if len(groups) > 0 {
+			return groups
+		}
+	}
+
+	base := c.defaultServerEntry()
+	return []serverAttemptGroup{{
+		Base:     base,
+		Variants: buildTransportVariants(base, c.config.Transport),
+	}}
+}
+
+func (c *Client) tryConnectCandidates(persistent bool) error {
+	groups := c.resolveAttemptGroups()
+	if len(groups) == 0 {
+		return fmt.Errorf("no servers available")
+	}
+
+	var lastErr error
+	for _, group := range groups {
+		for _, candidate := range group.Variants {
+			select {
+			case <-c.stopChan:
+				return nil
+			default:
+			}
+
+			c.resetTransportState()
+
+			start := time.Now()
+			err := c.connectCandidate(&candidate, persistent)
+			if c.selector != nil {
+				c.selector.ReportDialResult(candidate, time.Since(start), err)
+			}
+			if err == nil {
+				log.Printf("[Client] Connected to %s via %s", candidate.Address, transportLogLabel(candidate.Transport))
+				return nil
+			}
+
+			lastErr = err
+			log.Printf("[Client] Attempt %s via %s failed: %v", candidate.Address, transportLogLabel(candidate.Transport), err)
+			if !shouldRetryOtherTransports(err) {
+				break
+			}
+		}
+	}
+
+	if lastErr == nil {
+		return fmt.Errorf("all connection attempts failed")
+	}
+	return lastErr
+}
+
+func (c *Client) resolveServer() *ServerEntry {
+	groups := c.resolveAttemptGroups()
+	if len(groups) == 0 {
+		return nil
+	}
+	if len(groups[0].Variants) > 0 {
+		return &groups[0].Variants[0]
+	}
+	return &groups[0].Base
 }
 
 func (c *Client) connect(server *ServerEntry) error {
@@ -158,6 +230,30 @@ func (c *Client) connect(server *ServerEntry) error {
 	default:
 		return c.connectTLS(server, psk)
 	}
+}
+
+func (c *Client) connectCandidate(server *ServerEntry, persistent bool) error {
+	psk := server.PSK
+	if psk == "" {
+		psk = c.config.PSK
+	}
+
+	if persistent {
+		transport := normalizeTransportPreference(server.Transport)
+		if transport == "quic" {
+			if err := c.connectQUIC(server, psk); err != nil {
+				return err
+			}
+			if err := c.EnsurePersistentChannel(); err != nil {
+				c.resetTransportState()
+				return err
+			}
+			return nil
+		}
+		return c.connectTLSForTUN(server, psk)
+	}
+
+	return c.connect(server)
 }
 
 func (c *Client) connectTLS(server *ServerEntry, psk string) error {
@@ -183,6 +279,10 @@ func (c *Client) connectTLS(server *ServerEntry, psk string) error {
 		fingerprint = c.config.Fingerprint
 	}
 
+	if err := c.probeTLSPath(server.Address, sni, fingerprint); err != nil {
+		return err
+	}
+
 	c.proxy.SetDialer(func(addrType byte, addr string, port uint16) (net.Conn, error) {
 		conn, err := DialVPNServer(serverAddr, sni, psk, secretPath, fingerprint, addrType, addr, port)
 		if err != nil {
@@ -196,6 +296,14 @@ func (c *Client) connectTLS(server *ServerEntry, psk string) error {
 	c.mu.Unlock()
 
 	return nil
+}
+
+func (c *Client) probeTLSPath(serverAddr, sni, fingerprint string) error {
+	conn, err := DialTransport(serverAddr, sni, fingerprint)
+	if err != nil {
+		return err
+	}
+	return conn.Close()
 }
 
 func (c *Client) connectTLSForTUN(server *ServerEntry, psk string) error {
@@ -280,6 +388,7 @@ func (c *Client) connectTLSForTUN(server *ServerEntry, psk string) error {
 	}
 
 	c.mu.Lock()
+	c.transportCloser = conn
 	c.writer = NewFrameWriter(conn)
 	c.reader = NewFrameReader(conn)
 	c.connected = true
@@ -312,42 +421,19 @@ func (c *Client) connectQUIC(server *ServerEntry, psk string) error {
 		sni = host
 	}
 
-	host, port, _ := net.SplitHostPort(server.Address)
-
-	ips, err := net.LookupIP(host)
-	if err != nil {
-		return fmt.Errorf("DNS lookup failed for %s: %w", host, err)
-	}
-
-	var ip net.IP
-	for _, candidate := range ips {
-		if candidate.To4() != nil {
-			ip = candidate
-			break
-		}
-	}
-	if ip == nil && len(ips) > 0 {
-		ip = ips[0]
-	}
-	if ip == nil {
-		return fmt.Errorf("no IP addresses found for %s", host)
-	}
-
-	addr := net.JoinHostPort(ip.String(), port)
-	log.Printf("[Client] Connecting QUIC to %s (resolved: %s, SNI: %s)...", server.Address, addr, sni)
-
-	udpAddr, err := net.ResolveUDPAddr("udp4", addr)
+	udpAddr, err := net.ResolveUDPAddr("udp", server.Address)
 	if err != nil {
 		return fmt.Errorf("UDP resolve failed: %w", err)
 	}
+	log.Printf("[Client] Connecting QUIC to %s (resolved: %s, SNI: %s)...", server.Address, udpAddr.String(), sni)
 
-	udpConn, err := net.ListenUDP("udp4", nil)
+	udpConn, err := net.ListenUDP("udp", nil)
 	if err != nil {
 		return fmt.Errorf("UDP listen failed: %w", err)
 	}
 
-	udpConn.SetReadBuffer(7 * 1024 * 1024)
-	udpConn.SetWriteBuffer(7 * 1024 * 1024)
+	udpConn.SetReadBuffer(16 * 1024 * 1024)
+	udpConn.SetWriteBuffer(16 * 1024 * 1024)
 
 	tr := &quic.Transport{Conn: udpConn}
 
@@ -365,6 +451,8 @@ func (c *Client) connectQUIC(server *ServerEntry, psk string) error {
 		MaxStreamReceiveWindow:         64 * 1024 * 1024,
 		InitialConnectionReceiveWindow: 32 * 1024 * 1024,
 		MaxConnectionReceiveWindow:     128 * 1024 * 1024,
+		MaxIncomingStreams:             4096,
+		MaxIncomingUniStreams:          32,
 		Allow0RTT:                      true,
 	}
 
@@ -415,11 +503,68 @@ func (c *Client) connectQUIC(server *ServerEntry, psk string) error {
 
 	c.mu.Lock()
 	c.quicConn = conn
+	c.quicTransport = tr
 	c.connected = true
 	c.mu.Unlock()
 
 	c.proxy.SetQUIC(conn)
 
+	return nil
+}
+
+func (c *Client) EnsurePersistentChannel() error {
+	c.mu.Lock()
+	if c.writer != nil && c.reader != nil {
+		c.mu.Unlock()
+		return nil
+	}
+	conn := c.quicConn
+	c.mu.Unlock()
+
+	if conn == nil {
+		return fmt.Errorf("persistent channel unavailable")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	stream, err := conn.OpenStreamSync(ctx)
+	if err != nil {
+		return fmt.Errorf("persistent QUIC stream open failed: %w", err)
+	}
+
+	if _, err := stream.Write([]byte{0x00}); err != nil {
+		stream.Close()
+		return fmt.Errorf("persistent QUIC stream init failed: %w", err)
+	}
+
+	status := make([]byte, 1)
+	stream.SetReadDeadline(time.Now().Add(15 * time.Second))
+	_, err = io.ReadFull(stream, status)
+	stream.SetReadDeadline(time.Time{})
+	if err != nil {
+		stream.Close()
+		return fmt.Errorf("persistent QUIC stream ack failed: %w", err)
+	}
+	if status[0] != AuthStatusOK {
+		stream.Close()
+		return fmt.Errorf("persistent QUIC stream denied: status=%d", status[0])
+	}
+
+	writer := NewFrameWriter(stream)
+	reader := NewFrameReader(stream)
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.writer != nil && c.reader != nil {
+		writer.Close()
+		stream.Close()
+		return nil
+	}
+
+	c.transportCloser = stream
+	c.writer = writer
+	c.reader = reader
 	return nil
 }
 
@@ -498,18 +643,36 @@ func (c *Client) Stop() {
 		close(c.stopChan)
 	}
 
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if c.writer != nil {
-		c.writer.Close()
-	}
-	if c.quicConn != nil {
-		c.quicConn.CloseWithError(0, "")
-	}
-
+	c.resetTransportState()
 	c.proxy.Stop()
+}
+
+func (c *Client) resetTransportState() {
+	c.mu.Lock()
+	writer := c.writer
+	closer := c.transportCloser
+	quicConn := c.quicConn
+	quicTransport := c.quicTransport
+	c.writer = nil
+	c.reader = nil
+	c.transportCloser = nil
+	c.quicConn = nil
+	c.quicTransport = nil
 	c.connected = false
+	c.mu.Unlock()
+
+	if writer != nil {
+		writer.Close()
+	}
+	if closer != nil {
+		closer.Close()
+	}
+	if quicConn != nil {
+		quicConn.CloseWithError(0, "")
+	}
+	if quicTransport != nil {
+		quicTransport.Close()
+	}
 }
 
 func (c *Client) IsConnected() bool {
@@ -523,6 +686,15 @@ func (c *Client) GetProxy() *SOCKSProxy {
 }
 
 func (c *Client) WriteIPFrame(data []byte) error {
+	if err := c.EnsurePersistentChannel(); err != nil {
+		c.mu.Lock()
+		writer := c.writer
+		c.mu.Unlock()
+		if writer == nil {
+			return err
+		}
+	}
+
 	c.mu.Lock()
 	writer := c.writer
 	c.mu.Unlock()
@@ -533,6 +705,15 @@ func (c *Client) WriteIPFrame(data []byte) error {
 }
 
 func (c *Client) ReadFrame() (Frame, error) {
+	if err := c.EnsurePersistentChannel(); err != nil {
+		c.mu.Lock()
+		reader := c.reader
+		c.mu.Unlock()
+		if reader == nil {
+			return Frame{}, err
+		}
+	}
+
 	c.mu.Lock()
 	reader := c.reader
 	c.mu.Unlock()
@@ -547,4 +728,34 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+func shouldRetryOtherTransports(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	msg := strings.ToLower(err.Error())
+	terminalMarkers := []string{
+		"auth denied",
+		"authentication denied",
+		"tunnel auth denied",
+		"tun auth denied",
+		"invalid psk",
+	}
+	for _, marker := range terminalMarkers {
+		if strings.Contains(msg, marker) {
+			return false
+		}
+	}
+	return true
+}
+
+func transportLogLabel(transport string) string {
+	switch normalizeTransportPreference(transport) {
+	case "quic":
+		return "quic"
+	default:
+		return "tls"
+	}
 }

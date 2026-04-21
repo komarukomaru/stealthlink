@@ -61,7 +61,13 @@ func TestUTLSConnectivity(t *testing.T) {
 			if err != nil {
 				return
 			}
-			conn.Close()
+			go func() {
+				if tlsConn, ok := conn.(*tls.Conn); ok {
+					tlsConn.SetDeadline(time.Now().Add(5 * time.Second))
+					_ = tlsConn.Handshake()
+				}
+				conn.Close()
+			}()
 		}
 	}()
 

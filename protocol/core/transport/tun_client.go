@@ -67,27 +67,11 @@ func (tc *TunClient) Start() error {
 		go tc.client.httpProxy.Start()
 	}
 
-	server := tc.client.resolveServer()
-	transport := server.Transport
-	if transport == "" {
-		transport = tc.client.config.Transport
-	}
-	psk := server.PSK
-	if psk == "" {
-		psk = tc.client.config.PSK
-	}
-
-	if transport == "quic" {
-		go func() {
-			if err := tc.client.connectWithRetry(); err != nil {
-				log.Printf("[TUN] Client connection failed: %v", err)
-			}
-		}()
-	} else {
-		if err := tc.client.connectTLSForTUN(server, psk); err != nil {
-			return fmt.Errorf("TUN TLS connection failed: %v", err)
+	go func() {
+		if err := tc.client.connectPersistentWithRetry(); err != nil {
+			log.Printf("[TUN] Client connection failed: %v", err)
 		}
-	}
+	}()
 
 	for {
 		tc.client.mu.Lock()
@@ -171,7 +155,7 @@ func (tc *TunClient) vpnToTun() {
 			continue
 		}
 
-		frame, err := reader.ReadTypedFrame()
+		frame, err := reader.ReadTypedFramePooled()
 		if err != nil {
 			tc.mu.Lock()
 			running := tc.running
@@ -186,6 +170,7 @@ func (tc *TunClient) vpnToTun() {
 		if frame.Type == FrameIP {
 			tc.tunDev.WritePacket(frame.Payload)
 		}
+		frame.Release()
 	}
 }
 

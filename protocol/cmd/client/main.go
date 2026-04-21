@@ -17,7 +17,7 @@ func main() {
 	serverAddr := flag.String("server", "", "Server address (host:port)")
 	psk := flag.String("psk", "", "Pre-shared key for authentication")
 	sni := flag.String("sni", "", "SNI hostname (defaults to server hostname)")
-	transportMode := flag.String("transport", "tls", "Transport mode: tls or quic")
+	transportMode := flag.String("transport", "tls", "Transport mode: tls, quic, or auto")
 	socksAddr := flag.String("socks", "127.0.0.1:1080", "SOCKS5 proxy listen address")
 	httpAddr := flag.String("http", "", "HTTP proxy listen address (optional)")
 	secretPath := flag.String("path", "/api/v2/sync", "Secret path for HTTP camouflage auth")

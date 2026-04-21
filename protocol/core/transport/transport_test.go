@@ -7,6 +7,7 @@ package transport
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
 	"net"
 	"testing"
 	"time"
@@ -51,6 +52,32 @@ func TestTypedFrameRoundtrip(t *testing.T) {
 	}
 	if !bytes.Equal(result.Payload, frame.Payload) {
 		t.Fatalf("payload mismatch")
+	}
+}
+
+func TestTypedFrameRoundtripPooled(t *testing.T) {
+	buf := &bytes.Buffer{}
+	writer := NewFrameWriter(buf)
+	reader := NewFrameReader(buf)
+
+	frame := Frame{Type: FrameIP, Payload: []byte("pooled payload")}
+	writer.WriteTypedFrame(frame)
+	writer.Flush()
+
+	result, err := reader.ReadTypedFramePooled()
+	if err != nil {
+		t.Fatalf("ReadTypedFramePooled failed: %v", err)
+	}
+	defer result.Release()
+
+	if result.Type != frame.Type {
+		t.Fatalf("type mismatch: got %d, want %d", result.Type, frame.Type)
+	}
+	if !bytes.Equal(result.Payload, frame.Payload) {
+		t.Fatalf("payload mismatch")
+	}
+	if result.pkt.Buf == nil {
+		t.Fatal("expected pooled buffer to be retained")
 	}
 }
 
@@ -158,6 +185,23 @@ func TestAddressEncodeDecode(t *testing.T) {
 				t.Errorf("addr mismatch: got %q want %q", addr, tt.addr)
 			}
 		}
+	}
+}
+
+func TestReadAddressHeaderWithFirstByte(t *testing.T) {
+	encoded := EncodeAddress(AddrDomain, "example.com", 443)
+	addrType, addr, port, err := ReadAddressHeaderWithFirstByte(encoded[0], bytes.NewReader(encoded[1:]))
+	if err != nil {
+		t.Fatalf("ReadAddressHeaderWithFirstByte failed: %v", err)
+	}
+	if addrType != AddrDomain {
+		t.Fatalf("addr type mismatch: got %d", addrType)
+	}
+	if addr != "example.com" {
+		t.Fatalf("addr mismatch: got %q", addr)
+	}
+	if port != 443 {
+		t.Fatalf("port mismatch: got %d", port)
 	}
 }
 
@@ -410,6 +454,59 @@ func TestServerSelector(t *testing.T) {
 
 	if counts["a:443"] < 800 {
 		t.Fatalf("weighted selection broken: a=%d b=%d", counts["a:443"], counts["b:443"])
+	}
+}
+
+func TestBuildTransportVariants(t *testing.T) {
+	variants := buildTransportVariants(ServerEntry{Address: "a:443", Transport: "auto"}, "quic")
+	if len(variants) != 2 {
+		t.Fatalf("expected 2 variants, got %d", len(variants))
+	}
+	if variants[0].Transport != "quic" || variants[1].Transport != "tls" {
+		t.Fatalf("unexpected order for auto/quic preference: %q then %q", variants[0].Transport, variants[1].Transport)
+	}
+
+	variants = buildTransportVariants(ServerEntry{Address: "a:443", Transport: "tls"}, "quic")
+	if variants[0].Transport != "tls" || variants[1].Transport != "quic" {
+		t.Fatalf("unexpected order for explicit tls: %q then %q", variants[0].Transport, variants[1].Transport)
+	}
+}
+
+func TestServerSelectorRankServerGroupsPrefersHealthyTransport(t *testing.T) {
+	ss := NewServerSelector([]ServerEntry{
+		{Address: "edge.example.com:443", Weight: 1, Transport: "auto"},
+	})
+
+	ss.ReportDialResult(ServerEntry{Address: "edge.example.com:443", Weight: 1, Transport: "quic"}, 0, fmt.Errorf("quic dial failed"))
+	ss.ReportDialResult(ServerEntry{Address: "edge.example.com:443", Weight: 1, Transport: "tls"}, 20*time.Millisecond, nil)
+
+	groups := ss.RankServerGroups("quic")
+	if len(groups) != 1 {
+		t.Fatalf("expected single group, got %d", len(groups))
+	}
+	if len(groups[0].Variants) != 2 {
+		t.Fatalf("expected 2 variants, got %d", len(groups[0].Variants))
+	}
+	if groups[0].Variants[0].Transport != "tls" {
+		t.Fatalf("expected tls to be preferred after quic failure, got %q", groups[0].Variants[0].Transport)
+	}
+}
+
+func TestServerSelectorRankServerGroupsPrefersHealthyServer(t *testing.T) {
+	ss := NewServerSelector([]ServerEntry{
+		{Address: "bad.example.com:443", Weight: 1, Transport: "auto"},
+		{Address: "good.example.com:443", Weight: 1, Transport: "auto"},
+	})
+
+	ss.ReportDialResult(ServerEntry{Address: "bad.example.com:443", Weight: 1, Transport: "tls"}, 0, fmt.Errorf("timeout"))
+	ss.ReportDialResult(ServerEntry{Address: "good.example.com:443", Weight: 1, Transport: "tls"}, 15*time.Millisecond, nil)
+
+	groups := ss.RankServerGroups("tls")
+	if len(groups) != 2 {
+		t.Fatalf("expected 2 groups, got %d", len(groups))
+	}
+	if groups[0].Base.Address != "good.example.com:443" {
+		t.Fatalf("expected healthy server first, got %q", groups[0].Base.Address)
 	}
 }
 

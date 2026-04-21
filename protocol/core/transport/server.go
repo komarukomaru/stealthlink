@@ -18,7 +18,6 @@ import (
 	"log"
 	"math/big"
 	"net"
-	"strconv"
 	"sync"
 	"time"
 
@@ -213,15 +212,16 @@ func (s *Server) handleSmartConnection(conn net.Conn, session *AuthSession) {
 	}
 }
 
-func (s *Server) handleTUNSession(conn net.Conn, session *AuthSession) {
-	reader := NewFrameReader(conn)
-	writer := NewFrameWriter(conn)
+func (s *Server) handleTUNSession(rw io.ReadWriter, session *AuthSession) {
+	reader := NewFrameReader(rw)
+	writer := NewFrameWriter(rw)
+	defer writer.Close()
 
 	s.firewall.OnConnect(session.User.ID)
 	defer s.firewall.OnDisconnect(session.User.ID)
 
 	for {
-		frame, err := reader.ReadTypedFrame()
+		frame, err := reader.ReadTypedFramePooled()
 		if err != nil {
 			return
 		}
@@ -230,10 +230,14 @@ func (s *Server) handleTUNSession(conn net.Conn, session *AuthSession) {
 		case FrameIP:
 			s.firewall.TrackBandwidth(session.User.ID, int64(len(frame.Payload)))
 		case FrameConnect:
-			go s.handleFrameConnect(writer, frame, session)
+			payload := make([]byte, len(frame.Payload))
+			copy(payload, frame.Payload)
+			go s.handleFrameConnect(writer, Frame{Type: frame.Type, Payload: payload}, session)
 		case FrameClose:
 		case FramePadding:
 		}
+
+		frame.Release()
 	}
 }
 
@@ -285,8 +289,7 @@ func (s *Server) handleFrameConnect(writer *FrameWriter, frame Frame, session *A
 		return
 	}
 
-	target := net.JoinHostPort(addr, strconv.Itoa(int(port)))
-	targetConn, err := net.DialTimeout("tcp4", target, 10*time.Second)
+	targetConn, err := DialTarget(addr, port, 10*time.Second)
 	if err != nil {
 		ackPayload := make([]byte, 3)
 		binary.BigEndian.PutUint16(ackPayload[:2], streamID)
@@ -311,7 +314,6 @@ func (s *Server) handleFrameConnect(writer *FrameWriter, frame Frame, session *A
 			if n > 0 {
 				dataFrame := EncodeDataFrame(streamID, buf[:n])
 				writer.WriteTypedFrame(dataFrame)
-				writer.Flush()
 			}
 			if err != nil {
 				closePayload := make([]byte, 2)
@@ -422,8 +424,8 @@ func (s *Server) startQUIC() error {
 		return err
 	}
 
-	udpConn.SetReadBuffer(7 * 1024 * 1024)
-	udpConn.SetWriteBuffer(7 * 1024 * 1024)
+	udpConn.SetReadBuffer(16 * 1024 * 1024)
+	udpConn.SetWriteBuffer(16 * 1024 * 1024)
 
 	var packetConn net.PacketConn = udpConn
 	if s.replayFilter != nil {
@@ -440,6 +442,8 @@ func (s *Server) startQUIC() error {
 		MaxStreamReceiveWindow:         64 * 1024 * 1024,
 		InitialConnectionReceiveWindow: 32 * 1024 * 1024,
 		MaxConnectionReceiveWindow:     128 * 1024 * 1024,
+		MaxIncomingStreams:             4096,
+		MaxIncomingUniStreams:          32,
 		Allow0RTT:                      true,
 	}
 
@@ -506,7 +510,20 @@ func (s *Server) handleQUICConnection(conn *quic.Conn) {
 func (s *Server) handleQUICStream(stream *quic.Stream, session *AuthSession) {
 	defer stream.Close()
 
-	_, addr, port, err := ReadAddressHeader(stream)
+	var firstByte [1]byte
+	if _, err := io.ReadFull(stream, firstByte[:]); err != nil {
+		return
+	}
+
+	if firstByte[0] == 0x00 {
+		if _, err := stream.Write([]byte{AuthStatusOK}); err != nil {
+			return
+		}
+		s.handleTUNSession(stream, session)
+		return
+	}
+
+	_, addr, port, err := ReadAddressHeaderWithFirstByte(firstByte[0], stream)
 	if err != nil {
 		stream.Write([]byte{0x01})
 		return
@@ -520,14 +537,12 @@ func (s *Server) handleQUICStream(stream *quic.Stream, session *AuthSession) {
 	s.firewall.OnConnect(session.User.ID)
 	defer s.firewall.OnDisconnect(session.User.ID)
 
-	target := net.JoinHostPort(addr, strconv.Itoa(int(port)))
-	tcpConn, err := net.DialTimeout("tcp4", target, 10*time.Second)
+	tcpConn, err := DialTarget(addr, port, 10*time.Second)
 	if err != nil {
 		stream.Write([]byte{0x02})
 		return
 	}
 	defer tcpConn.Close()
-	TuneTCPConn(tcpConn)
 
 	stream.Write([]byte{0x00})
 

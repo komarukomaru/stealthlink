@@ -66,7 +66,7 @@ func TuneTCPConn(conn net.Conn) {
 
 func DialTarget(addr string, port uint16, timeout time.Duration) (net.Conn, error) {
 	target := net.JoinHostPort(addr, strconv.Itoa(int(port)))
-	conn, err := net.DialTimeout("tcp4", target, timeout)
+	conn, err := net.DialTimeout("tcp", target, timeout)
 	if err != nil {
 		return nil, err
 	}
@@ -79,7 +79,11 @@ func ReadAddressHeader(r io.Reader) (addrType byte, addr string, port uint16, er
 	if _, err = io.ReadFull(r, header); err != nil {
 		return
 	}
-	addrType = header[0]
+	return ReadAddressHeaderWithFirstByte(header[0], r)
+}
+
+func ReadAddressHeaderWithFirstByte(firstByte byte, r io.Reader) (addrType byte, addr string, port uint16, err error) {
+	addrType = firstByte
 
 	switch addrType {
 	case AddrIPv4:
