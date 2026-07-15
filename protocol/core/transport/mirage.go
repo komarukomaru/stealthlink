@@ -5,8 +5,8 @@
 package transport
 
 import (
+	"context"
 	"crypto/rand"
-	"crypto/tls"
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
@@ -16,6 +16,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	utls "github.com/refraction-networking/utls"
 )
 
 type MirageConfig struct {
@@ -48,23 +50,34 @@ func random_session_id() (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
-func mirage_http_client(host string, insecure bool) *http.Client {
+func mirage_http_client(host, fingerprint string, insecure bool) *http.Client {
 	return &http.Client{
 		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{
-				ServerName:         host,
-				InsecureSkipVerify: insecure,
+			DialTLSContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+				raw, err := (&net.Dialer{Timeout: mirage_dial_deadline}).DialContext(ctx, network, addr)
+				if err != nil {
+					return nil, err
+				}
+				uconn := utls.UClient(raw, &utls.Config{
+					ServerName:         host,
+					InsecureSkipVerify: insecure,
+					NextProtos:         []string{"http/1.1"},
+				}, reality_hello_id(fingerprint))
+				if err := uconn.HandshakeContext(ctx); err != nil {
+					raw.Close()
+					return nil, err
+				}
+				return uconn, nil
 			},
 			MaxIdleConns:        32,
 			MaxIdleConnsPerHost: 32,
 			MaxConnsPerHost:     0,
 			IdleConnTimeout:     90 * time.Second,
-			ForceAttemptHTTP2:   true,
 		},
 	}
 }
 
-func mirage_dial(target_addr, host, path, auth_b64 string, insecure bool) (net.Conn, error) {
+func mirage_dial(target_addr, host, path, fingerprint, auth_b64 string, insecure bool) (net.Conn, error) {
 	session, err := random_session_id()
 	if err != nil {
 		return nil, err
@@ -74,7 +87,7 @@ func mirage_dial(target_addr, host, path, auth_b64 string, insecure bool) (net.C
 		host = hostOnly(target_addr)
 	}
 	base := "https://" + target_addr + mirage_normalize_path(path)
-	client := mirage_http_client(host, insecure)
+	client := mirage_http_client(host, fingerprint, insecure)
 
 	get_req, err := http.NewRequest("GET", base+"/"+session, nil)
 	if err != nil {
@@ -162,14 +175,14 @@ func mirage_uplink_loop(pump net.Conn, client *http.Client, base, session, host,
 	client.CloseIdleConnections()
 }
 
-func mirage_dial_vpn(target_addr, host, path, psk string, insecure bool, addr_type byte, addr string, port uint16) (net.Conn, error) {
+func mirage_dial_vpn(target_addr, host, path, fingerprint, psk string, insecure bool, addr_type byte, addr string, port uint16) (net.Conn, error) {
 	auth, err := GenerateAuthPayload(psk)
 	if err != nil {
 		return nil, fmt.Errorf("auth generation failed: %w", err)
 	}
 	auth_b64 := base64.StdEncoding.EncodeToString(auth)
 
-	conn, err := mirage_dial(target_addr, host, path, auth_b64, insecure)
+	conn, err := mirage_dial(target_addr, host, path, fingerprint, auth_b64, insecure)
 	if err != nil {
 		return nil, err
 	}

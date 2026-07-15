@@ -331,11 +331,16 @@ func (c *Client) connectMirage(server *ServerEntry, psk string) error {
 	insecure := c.config.InsecureSkip
 	target := server.Address
 
+	fingerprint := server.Fingerprint
+	if fingerprint == "" {
+		fingerprint = c.config.Fingerprint
+	}
+
 	authProbe, err := GenerateAuthPayload(psk)
 	if err != nil {
 		return err
 	}
-	probe, err := mirage_dial(target, sni, path, base64.StdEncoding.EncodeToString(authProbe), insecure)
+	probe, err := mirage_dial(target, sni, path, fingerprint, base64.StdEncoding.EncodeToString(authProbe), insecure)
 	if err != nil {
 		return err
 	}
@@ -344,7 +349,7 @@ func (c *Client) connectMirage(server *ServerEntry, psk string) error {
 	log.Printf("[Client] MIRAGE mode to %s (Host: %s, path: %s)", target, sni, mirage_normalize_path(path))
 
 	c.proxy.SetDialer(func(addrType byte, addr string, port uint16) (net.Conn, error) {
-		conn, err := mirage_dial_vpn(target, sni, path, psk, insecure, addrType, addr, port)
+		conn, err := mirage_dial_vpn(target, sni, path, fingerprint, psk, insecure, addrType, addr, port)
 		if err != nil {
 			log.Printf("[Client] Mirage dial failed %s:%d: %v", addr, port, err)
 		}

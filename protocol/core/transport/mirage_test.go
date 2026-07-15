@@ -50,7 +50,7 @@ func TestMirageEndToEnd(t *testing.T) {
 	defer ts.Close()
 	target := strings.TrimPrefix(ts.URL, "https://")
 
-	conn, err := mirage_dial_vpn(target, "example.com", "/v2/media/segments", psk, true, AddrIPv4, "203.0.113.5", 80)
+	conn, err := mirage_dial_vpn(target, "example.com", "/v2/media/segments", "chrome", psk, true, AddrIPv4, "203.0.113.5", 80)
 	if err != nil {
 		t.Fatalf("mirage_dial_vpn: %v", err)
 	}
@@ -80,7 +80,7 @@ func TestMirageRejectsBadAuth(t *testing.T) {
 	defer ts.Close()
 	target := strings.TrimPrefix(ts.URL, "https://")
 
-	_, err := mirage_dial_vpn(target, "example.com", "/v2/media/segments", "wrong-key", true, AddrIPv4, "203.0.113.5", 80)
+	_, err := mirage_dial_vpn(target, "example.com", "/v2/media/segments", "chrome", "wrong-key", true, AddrIPv4, "203.0.113.5", 80)
 	if err == nil {
 		t.Fatal("expected failure with wrong PSK")
 	}
