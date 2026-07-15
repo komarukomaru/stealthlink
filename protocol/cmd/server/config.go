@@ -26,6 +26,8 @@ type Config struct {
 
 	Mirage transport.MirageConfig `json:"mirage"`
 
+	Masque transport.MasqueConfig `json:"masque"`
+
 	Users []*transport.UserRecord `json:"users"`
 
 	Firewall transport.FirewallConfig `json:"firewall"`
@@ -145,6 +147,7 @@ func (c *Config) ToServerConfig() transport.ServerConfig {
 		Camouflage:  camouflageCfg,
 		Reality:     c.Reality,
 		Mirage:      c.Mirage,
+		Masque:      c.Masque,
 		Users:       c.Users,
 		FirewallCfg: c.Firewall,
 		PaddingCfg:  paddingCfg,

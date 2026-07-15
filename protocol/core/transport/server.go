@@ -18,6 +18,7 @@ import (
 	"time"
 
 	quic "github.com/quic-go/quic-go"
+	"github.com/quic-go/quic-go/http3"
 )
 
 type ServerConfig struct {
@@ -27,6 +28,7 @@ type ServerConfig struct {
 	Camouflage  CamouflageConfig
 	Reality     RealityConfig
 	Mirage      MirageConfig
+	Masque      MasqueConfig
 	Users       []*UserRecord
 	FirewallCfg FirewallConfig
 	PaddingCfg  PaddingConfig
@@ -65,6 +67,8 @@ func (s *Server) Start() error {
 		return s.startReality()
 	case "mirage":
 		return s.startMirage()
+	case "masque":
+		return s.startMasque()
 	case "tls":
 		return s.startTLS()
 	case "quic":
@@ -112,6 +116,38 @@ func (s *Server) startTLS() error {
 		}
 		go s.handleTLSConnectionWrapped(conn, tlsConfig)
 	}
+}
+
+func (s *Server) startMasque() error {
+	tlsConfig, err := s.generateTLSConfigForTransport("quic")
+	if err != nil {
+		return err
+	}
+
+	udpAddr, err := net.ResolveUDPAddr("udp", s.config.BindAddress)
+	if err != nil {
+		return err
+	}
+	udpConn, err := net.ListenUDP("udp", udpAddr)
+	if err != nil {
+		return err
+	}
+
+	handler := &masque_handler{
+		auth: s.auth,
+		onSession: func(conn net.Conn, session *AuthSession) {
+			s.handleDirectConnection(conn, session)
+		},
+	}
+
+	srv := &http3.Server{
+		Handler:         handler,
+		TLSConfig:       tlsConfig,
+		EnableDatagrams: true,
+	}
+
+	log.Printf("[Server] MASQUE (HTTP/3) server listening on %s", s.config.BindAddress)
+	return srv.Serve(udpConn)
 }
 
 func (s *Server) startMirage() error {

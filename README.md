@@ -148,6 +148,19 @@ Server config uses `transport: "mirage"` with an optional `path` (see `cmd/serve
   -sni "cdn.your-domain.com" -mirage-path "/v2/media/segments"
 ```
 
+- **`masque`**: Genuine HTTP/3 tunnel over QUIC using an Extended CONNECT request (MASQUE-style).
+  - *Best for*: UDP-friendly networks where the traffic must survive inspection by a probe that speaks real HTTP/3.
+  - *Behavior*: The client opens a real HTTP/3 connection (SETTINGS/HEADERS/DATA frames) and issues a `CONNECT` request with `:protocol = connect-udp`; the server hijacks the stream and tunnels over it. Unlike the raw `quic` transport, an HTTP/3-speaking prober sees a well-formed h3 endpoint. Authentication rides in the `Authorization: Bearer` header; non-CONNECT requests get a plain `404`.
+
+#### MASQUE setup
+
+Server config uses `transport: "masque"` with an optional `path` (see `cmd/server/config_masque.example.json`).
+
+```bash
+./client -server "1.2.3.4:443" -transport masque -psk "YOUR-PSK" \
+  -sni "www.microsoft.com" -masque-path "/.well-known/masque/udp/"
+```
+
 #### Custom TLS certificate
 
 By default every TCP transport (`tls`, `mirage`, ...) generates a blended self-signed certificate. To serve your own certificate instead — required for CDN "Full (strict)" mode or a direct client without `-insecure` — set the top-level `tls` section. It applies to both the plain `tls` transport and `mirage`:

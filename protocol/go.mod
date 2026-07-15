@@ -13,7 +13,9 @@ require (
 require (
 	github.com/andybalholm/brotli v1.0.6 // indirect
 	github.com/klauspost/compress v1.17.4 // indirect
+	github.com/quic-go/qpack v0.6.0 // indirect
 	golang.org/x/net v0.43.0 // indirect
 	golang.org/x/sys v0.35.0 // indirect
+	golang.org/x/text v0.28.0 // indirect
 	golang.zx2c4.com/wintun v0.0.0-20230126152724-0fa3db229ce2 // indirect
 )
