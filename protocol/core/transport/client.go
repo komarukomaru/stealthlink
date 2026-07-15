@@ -249,10 +249,55 @@ func (c *Client) connect(server *ServerEntry) error {
 	case "masque":
 		return c.connectMasque(server, psk)
 	case "quic":
+		fingerprint := server.Fingerprint
+		if fingerprint == "" {
+			fingerprint = c.config.Fingerprint
+		}
+		if fingerprint != "" {
+			return c.connectQUICUTLS(server, psk, fingerprint)
+		}
 		return c.connectQUIC(server, psk)
 	default:
 		return c.connectTLS(server, psk)
 	}
+}
+
+func (c *Client) connectQUICUTLS(server *ServerEntry, psk, fingerprint string) error {
+	sni := server.SNI
+	if sni == "" {
+		sni = c.config.SNI
+	}
+	if sni == "" {
+		host, _, _ := net.SplitHostPort(server.Address)
+		sni = host
+	}
+
+	sess, err := uquic_dial(server.Address, sni, fingerprint, c.config.InsecureSkip)
+	if err != nil {
+		return err
+	}
+	if err := uquic_authenticate(sess, psk); err != nil {
+		sess.Close()
+		return err
+	}
+
+	log.Printf("[Client] QUIC (uTLS %s) mode to %s (SNI: %s)", fingerprint, server.Address, sni)
+
+	c.mu.Lock()
+	c.setActiveServerLocked(server, psk)
+	c.transportCloser = sess
+	c.connected = true
+	c.mu.Unlock()
+
+	c.proxy.SetDialer(func(addrType byte, addr string, port uint16) (net.Conn, error) {
+		conn, err := uquic_open_target(sess, addrType, addr, port)
+		if err != nil {
+			log.Printf("[Client] QUIC(uTLS) dial failed %s:%d: %v", addr, port, err)
+		}
+		return conn, err
+	})
+
+	return nil
 }
 
 func (c *Client) connectCandidate(server *ServerEntry, persistent bool) error {

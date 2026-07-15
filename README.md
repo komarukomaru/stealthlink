@@ -107,7 +107,7 @@ The server supports strict transport selection to optimize for specific network 
   - *Behavior*: Listens ONLY on TCP. UDP/QUIC is disabled.
 - **`quic`**: HTTP/3 over QUIC (UDP).
   - *Best for*: High performance, low latency, lossy networks.
-  - *Behavior*: Listens ONLY on UDP. TCP/TLS fallback is disabled.
+  - *Behavior*: Listens ONLY on UDP. TCP/TLS fallback is disabled. When the client is given a `-fingerprint`, the QUIC Initial packet (ClientHello) is mimicked after a real Chrome or Firefox QUIC handshake via uTLS, instead of the default Go fingerprint.
 - **`any`**: Dual-stack mode.
   - *Best for*: Flexibility. Clients can choose their preferred transport.
   - *Behavior*: Listens on BOTH UDP (QUIC) and TCP (TLS).
