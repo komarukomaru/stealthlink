@@ -355,6 +355,8 @@ func normalizeTransportPreference(transport string) string {
 		return "quic"
 	case "reality":
 		return "reality"
+	case "mirage":
+		return "mirage"
 	case "any", "auto":
 		return "auto"
 	default:
@@ -371,9 +373,9 @@ func buildTransportVariants(base ServerEntry, preferredTransport string) []Serve
 		primary = "tls"
 	}
 
-	if primary == "reality" {
+	if primary == "reality" || primary == "mirage" {
 		variant := base
-		variant.Transport = "reality"
+		variant.Transport = primary
 		if variant.Weight <= 0 {
 			variant.Weight = 1
 		}

@@ -37,6 +37,8 @@ type ClientConfig struct {
 
 	RealityPublicKey string
 	RealityShortID   string
+
+	MiragePath string
 }
 
 type Client struct {
@@ -239,6 +241,8 @@ func (c *Client) connect(server *ServerEntry) error {
 	switch transport {
 	case "reality":
 		return c.connectReality(server, psk)
+	case "mirage":
+		return c.connectMirage(server, psk)
 	case "quic":
 		return c.connectQUIC(server, psk)
 	default:
@@ -301,6 +305,48 @@ func (c *Client) connectTLS(server *ServerEntry, psk string) error {
 		conn, err := DialVPNServer(serverAddr, sni, psk, secretPath, fingerprint, addrType, addr, port)
 		if err != nil {
 			log.Printf("[Client] Dial failed %s:%d: %v", addr, port, err)
+		}
+		return conn, err
+	})
+
+	c.mu.Lock()
+	c.setActiveServerLocked(server, psk)
+	c.connected = true
+	c.mu.Unlock()
+
+	return nil
+}
+
+func (c *Client) connectMirage(server *ServerEntry, psk string) error {
+	sni := server.SNI
+	if sni == "" {
+		sni = c.config.SNI
+	}
+	if sni == "" {
+		host, _, _ := net.SplitHostPort(server.Address)
+		sni = host
+	}
+
+	path := c.config.MiragePath
+	insecure := c.config.InsecureSkip
+	target := server.Address
+
+	authProbe, err := GenerateAuthPayload(psk)
+	if err != nil {
+		return err
+	}
+	probe, err := mirage_dial(target, sni, path, base64.StdEncoding.EncodeToString(authProbe), insecure)
+	if err != nil {
+		return err
+	}
+	probe.Close()
+
+	log.Printf("[Client] MIRAGE mode to %s (Host: %s, path: %s)", target, sni, mirage_normalize_path(path))
+
+	c.proxy.SetDialer(func(addrType byte, addr string, port uint16) (net.Conn, error) {
+		conn, err := mirage_dial_vpn(target, sni, path, psk, insecure, addrType, addr, port)
+		if err != nil {
+			log.Printf("[Client] Mirage dial failed %s:%d: %v", addr, port, err)
 		}
 		return conn, err
 	})
