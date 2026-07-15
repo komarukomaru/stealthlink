@@ -6,18 +6,12 @@ package transport
 
 import (
 	"context"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
 	"crypto/tls"
-	"crypto/x509"
-	"crypto/x509/pkix"
 	"encoding/binary"
-	"encoding/pem"
 	"io"
 	"log"
-	"math/big"
 	"net"
+	"net/url"
 	"strconv"
 	"sync"
 	"time"
@@ -702,41 +696,24 @@ func (s *Server) generateTLSConfigForTransport(transport string) (*tls.Config, e
 		}, nil
 	}
 
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		return nil, err
-	}
-
-	serialNumber, _ := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
-
 	sni := s.config.SNI
 	if sni == "" {
-		sni = "cloudflare-dns.com"
+		sni = "localhost"
 	}
 
-	template := x509.Certificate{
-		SerialNumber: serialNumber,
-		Subject: pkix.Name{
-			Organization: []string{"Cloudflare Inc"},
-			CommonName:   sni,
-		},
-		NotBefore:             time.Now().Add(-24 * time.Hour),
-		NotAfter:              time.Now().Add(365 * 24 * time.Hour),
-		KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-		BasicConstraintsValid: true,
+	// Prefer a cert whose structure mirrors the camouflage target's real leaf;
+	// otherwise fall back to a generic domain-validated-looking self-signed cert.
+	var tlsCert tls.Certificate
+	var err error
+	if s.config.Camouflage.TargetURL != "" {
+		if u, perr := url.Parse(s.config.Camouflage.TargetURL); perr == nil && u.Host != "" {
+			tlsCert, err = CloneCertFromTarget(u.Host, sni)
+		} else {
+			tlsCert, err = GenerateStealthCert(sni)
+		}
+	} else {
+		tlsCert, err = GenerateStealthCert(sni)
 	}
-
-	certDER, err := x509.CreateCertificate(rand.Reader, &template, &template, &key.PublicKey, key)
-	if err != nil {
-		return nil, err
-	}
-
-	keyBytes, _ := x509.MarshalECPrivateKey(key)
-	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyBytes})
-	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
-
-	tlsCert, err := tls.X509KeyPair(certPEM, keyPEM)
 	if err != nil {
 		return nil, err
 	}
