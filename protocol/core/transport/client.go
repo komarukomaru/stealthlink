@@ -34,6 +34,9 @@ type ClientConfig struct {
 	StealthCfg   StealthConfig
 	Subscription *SubscriptionConfig
 	Fingerprint  string // https://github.com/komarukomaru/stealthlink/issues/2
+
+	RealityPublicKey string
+	RealityShortID   string
 }
 
 type Client struct {
@@ -234,6 +237,8 @@ func (c *Client) connect(server *ServerEntry) error {
 	}
 
 	switch transport {
+	case "reality":
+		return c.connectReality(server, psk)
 	case "quic":
 		return c.connectQUIC(server, psk)
 	default:
@@ -296,6 +301,55 @@ func (c *Client) connectTLS(server *ServerEntry, psk string) error {
 		conn, err := DialVPNServer(serverAddr, sni, psk, secretPath, fingerprint, addrType, addr, port)
 		if err != nil {
 			log.Printf("[Client] Dial failed %s:%d: %v", addr, port, err)
+		}
+		return conn, err
+	})
+
+	c.mu.Lock()
+	c.setActiveServerLocked(server, psk)
+	c.connected = true
+	c.mu.Unlock()
+
+	return nil
+}
+
+func (c *Client) connectReality(server *ServerEntry, psk string) error {
+	sni := server.SNI
+	if sni == "" {
+		sni = c.config.SNI
+	}
+	if sni == "" {
+		host, _, _ := net.SplitHostPort(server.Address)
+		sni = host
+	}
+
+	pub, err := parse_x25519_public(c.config.RealityPublicKey)
+	if err != nil {
+		return fmt.Errorf("reality public key: %w", err)
+	}
+	sid, err := parse_short_id(c.config.RealityShortID)
+	if err != nil {
+		return err
+	}
+
+	fingerprint := server.Fingerprint
+	if fingerprint == "" {
+		fingerprint = c.config.Fingerprint
+	}
+
+	probe, err := reality_dial(server.Address, sni, fingerprint, pub, sid)
+	if err != nil {
+		return err
+	}
+	probe.Close()
+
+	log.Printf("[Client] REALITY mode to %s (SNI: %s)", server.Address, sni)
+
+	serverAddr := server.Address
+	c.proxy.SetDialer(func(addrType byte, addr string, port uint16) (net.Conn, error) {
+		conn, err := reality_dial_vpn(serverAddr, sni, fingerprint, psk, pub, sid, addrType, addr, port)
+		if err != nil {
+			log.Printf("[Client] Reality dial failed %s:%d: %v", addr, port, err)
 		}
 		return conn, err
 	})

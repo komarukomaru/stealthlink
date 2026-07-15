@@ -5,18 +5,11 @@
 package transport
 
 import (
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
 	"crypto/tls"
-	"crypto/x509"
-	"crypto/x509/pkix"
 	"encoding/base64"
-	"encoding/pem"
 	"fmt"
 	"io"
 	"log"
-	"math/big"
 	"net"
 	"net/http"
 	"net/url"
@@ -113,11 +106,20 @@ func NewCamouflageServer(config CamouflageConfig, auth *AuthManager, fw *Firewal
 			NextProtos:   []string{"http/1.1", "h2"},
 		}
 	} else {
-		sni := "cloudflare-dns.com"
+		sni := "localhost"
 		if cs.targetURL != nil {
 			sni = cs.targetURL.Hostname()
 		}
-		cert, err := generateSelfSignedCert(sni)
+
+		var cert tls.Certificate
+		var err error
+		if cs.targetURL != nil {
+			// Clone the real target's leaf template so the fallback cert blends
+			// in structurally instead of impersonating a known CA.
+			cert, err = CloneCertFromTarget(cs.targetURL.Host, sni)
+		} else {
+			cert, err = GenerateStealthCert(sni)
+		}
 		if err != nil {
 			return nil, fmt.Errorf("failed to generate self-signed cert: %w", err)
 		}
@@ -605,36 +607,3 @@ func pipe(dst io.Writer, src io.Reader) {
 	}
 }
 
-func generateSelfSignedCert(sni string) (tls.Certificate, error) {
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		return tls.Certificate{}, err
-	}
-
-	serialNumber, _ := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
-
-	template := x509.Certificate{
-		SerialNumber: serialNumber,
-		Subject: pkix.Name{
-			Organization: []string{"Cloudflare Inc"},
-			CommonName:   sni,
-		},
-		DNSNames:              []string{sni},
-		NotBefore:             time.Now().Add(-24 * time.Hour),
-		NotAfter:              time.Now().Add(365 * 24 * time.Hour),
-		KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-		BasicConstraintsValid: true,
-	}
-
-	certDER, err := x509.CreateCertificate(rand.Reader, &template, &template, &key.PublicKey, key)
-	if err != nil {
-		return tls.Certificate{}, err
-	}
-
-	keyBytes, _ := x509.MarshalECPrivateKey(key)
-	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyBytes})
-	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
-
-	return tls.X509KeyPair(certPEM, keyPEM)
-}

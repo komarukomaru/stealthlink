@@ -17,6 +17,8 @@ type Config struct {
 
 	Camouflage transport.CamouflageConfig `json:"camouflage"`
 
+	Reality transport.RealityConfig `json:"reality"`
+
 	Users []*transport.UserRecord `json:"users"`
 
 	Firewall transport.FirewallConfig `json:"firewall"`
@@ -128,6 +130,7 @@ func (c *Config) ToServerConfig() transport.ServerConfig {
 		SNI:         c.SNI,
 		Transport:   c.Transport,
 		Camouflage:  c.Camouflage,
+		Reality:     c.Reality,
 		Users:       c.Users,
 		FirewallCfg: c.Firewall,
 		PaddingCfg:  paddingCfg,

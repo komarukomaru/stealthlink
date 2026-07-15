@@ -6,18 +6,12 @@ package transport
 
 import (
 	"context"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
 	"crypto/tls"
-	"crypto/x509"
-	"crypto/x509/pkix"
 	"encoding/binary"
-	"encoding/pem"
 	"io"
 	"log"
-	"math/big"
 	"net"
+	"net/url"
 	"strconv"
 	"sync"
 	"time"
@@ -30,6 +24,7 @@ type ServerConfig struct {
 	SNI         string
 	Transport   string
 	Camouflage  CamouflageConfig
+	Reality     RealityConfig
 	Users       []*UserRecord
 	FirewallCfg FirewallConfig
 	PaddingCfg  PaddingConfig
@@ -64,6 +59,8 @@ func (s *Server) Start() error {
 	log.Printf("[Server] Starting with transport=%s on %s", s.config.Transport, s.config.BindAddress)
 
 	switch s.config.Transport {
+	case "reality":
+		return s.startReality()
 	case "tls":
 		return s.startTLS()
 	case "quic":
@@ -111,6 +108,52 @@ func (s *Server) startTLS() error {
 		}
 		go s.handleTLSConnectionWrapped(conn, tlsConfig)
 	}
+}
+
+func (s *Server) startReality() error {
+	disp, err := new_reality_dispatcher(s.config.Reality)
+	if err != nil {
+		return err
+	}
+
+	listener, err := net.Listen("tcp", s.config.BindAddress)
+	if err != nil {
+		return err
+	}
+
+	log.Printf("[Server] REALITY server listening on %s (dest=%s)", s.config.BindAddress, s.config.Reality.Dest)
+
+	for {
+		conn, err := listener.Accept()
+		if err != nil {
+			continue
+		}
+		go s.handleRealityConnection(conn, disp)
+	}
+}
+
+func (s *Server) handleRealityConnection(conn net.Conn, disp *reality_dispatcher) {
+	pconn, err := reality_peek(conn, 76, 128)
+	if err != nil {
+		conn.Close()
+		return
+	}
+
+	if s.replayFilter != nil {
+		peek := pconn.Peek()
+		if len(peek) > 43 && peek[0] == 0x16 {
+			if s.replayFilter.CheckAndAdd(peek[11 : 11+32]) {
+				pconn.Close()
+				return
+			}
+		}
+	}
+
+	tconn, ours := disp.accept(pconn)
+	if !ours {
+		return
+	}
+	s.handleTLSConnection(tconn)
 }
 
 func (s *Server) handleTLSConnectionWrapped(conn net.Conn, tlsConfig *tls.Config) {
@@ -702,41 +745,24 @@ func (s *Server) generateTLSConfigForTransport(transport string) (*tls.Config, e
 		}, nil
 	}
 
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		return nil, err
-	}
-
-	serialNumber, _ := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
-
 	sni := s.config.SNI
 	if sni == "" {
-		sni = "cloudflare-dns.com"
+		sni = "localhost"
 	}
 
-	template := x509.Certificate{
-		SerialNumber: serialNumber,
-		Subject: pkix.Name{
-			Organization: []string{"Cloudflare Inc"},
-			CommonName:   sni,
-		},
-		NotBefore:             time.Now().Add(-24 * time.Hour),
-		NotAfter:              time.Now().Add(365 * 24 * time.Hour),
-		KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-		BasicConstraintsValid: true,
+	// Prefer a cert whose structure mirrors the camouflage target's real leaf;
+	// otherwise fall back to a generic domain-validated-looking self-signed cert.
+	var tlsCert tls.Certificate
+	var err error
+	if s.config.Camouflage.TargetURL != "" {
+		if u, perr := url.Parse(s.config.Camouflage.TargetURL); perr == nil && u.Host != "" {
+			tlsCert, err = CloneCertFromTarget(u.Host, sni)
+		} else {
+			tlsCert, err = GenerateStealthCert(sni)
+		}
+	} else {
+		tlsCert, err = GenerateStealthCert(sni)
 	}
-
-	certDER, err := x509.CreateCertificate(rand.Reader, &template, &template, &key.PublicKey, key)
-	if err != nil {
-		return nil, err
-	}
-
-	keyBytes, _ := x509.MarshalECPrivateKey(key)
-	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyBytes})
-	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
-
-	tlsCert, err := tls.X509KeyPair(certPEM, keyPEM)
 	if err != nil {
 		return nil, err
 	}

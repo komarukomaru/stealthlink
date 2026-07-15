@@ -111,6 +111,29 @@ The server supports strict transport selection to optimize for specific network 
 - **`any`**: Dual-stack mode.
   - *Best for*: Flexibility. Clients can choose their preferred transport.
   - *Behavior*: Listens on BOTH UDP (QUIC) and TCP (TLS).
+- **`reality`**: TLS 1.3 over TCP with REALITY-style handshake authentication.
+  - *Best for*: Environments with active TLS probing, where a self-signed certificate would be flagged.
+  - *Behavior*: Authentication is embedded in the ClientHello (X25519 key in `session_id`, sealed token in `random`). Authenticated clients are terminated locally with a certificate whose structure is cloned from `dest`. Any other connection (probes, scanners, real browsers) is transparently proxied to the real `dest`, so it sees the genuine site with its genuine CA-signed certificate.
+
+#### REALITY setup
+
+Generate a keypair on the server:
+
+```bash
+./server -gen-reality
+# private_key (server): <base64>
+# public_key  (client): <base64>
+```
+
+Put the `private_key` and one or more `short_ids` in the server config (`transport: "reality"`, see `cmd/server/config_reality.example.json`). The `dest` should be a real HTTPS site reachable from the server; `server_name` (SNI) must be a name that `dest` serves.
+
+Connect the client with the matching `public_key` and `short_id`:
+
+```bash
+./client -server "1.2.3.4:443" -transport reality -psk "YOUR-PSK" \
+  -sni "www.microsoft.com" -fingerprint chrome \
+  -reality-key "<public_key>" -reality-short-id "0011223344556677"
+```
 
 ### Server
 The server is configured via a JSON file. See `cmd/server/config.example.json` for a complete example.
