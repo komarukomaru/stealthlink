@@ -114,8 +114,6 @@ func NewCamouflageServer(config CamouflageConfig, auth *AuthManager, fw *Firewal
 		var cert tls.Certificate
 		var err error
 		if cs.targetURL != nil {
-			// Clone the real target's leaf template so the fallback cert blends
-			// in structurally instead of impersonating a known CA.
 			cert, err = CloneCertFromTarget(cs.targetURL.Host, sni)
 		} else {
 			cert, err = GenerateStealthCert(sni)

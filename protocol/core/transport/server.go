@@ -781,8 +781,6 @@ func (s *Server) generateTLSConfigForTransport(transport string) (*tls.Config, e
 		sni = "localhost"
 	}
 
-	// Prefer a cert whose structure mirrors the camouflage target's real leaf;
-	// otherwise fall back to a generic domain-validated-looking self-signed cert.
 	var tlsCert tls.Certificate
 	var err error
 	if s.config.Camouflage.TargetURL != "" {
