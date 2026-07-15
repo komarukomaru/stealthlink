@@ -26,6 +26,8 @@ func main() {
 	noPadding := flag.Bool("no-padding", false, "Disable traffic padding")
 	noStealth := flag.Bool("no-stealth", false, "Disable stealth features")
 	fingerprint := flag.String("fingerprint", "", "uTLS fingerprint (chrome, firefox, ios, android, 360, qq, random)") // https://github.com/komarukomaru/stealthlink/issues/2
+	realityPubKey := flag.String("reality-key", "", "REALITY server public key (base64) for transport=reality")
+	realityShortID := flag.String("reality-short-id", "", "REALITY short id (hex) for transport=reality")
 	flag.Parse()
 
 	var subscription *transport.SubscriptionConfig
@@ -64,6 +66,9 @@ func main() {
 		StealthCfg:   stealthCfg,
 		Subscription: subscription,
 		Fingerprint:  *fingerprint,
+
+		RealityPublicKey: *realityPubKey,
+		RealityShortID:   *realityShortID,
 	}
 
 	client := transport.NewClient(config)

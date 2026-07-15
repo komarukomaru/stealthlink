@@ -15,7 +15,18 @@ import (
 func main() {
 	configPath := flag.String("config", "config.json", "Path to config file")
 	genConfig := flag.Bool("gen-config", false, "Generate default config file and exit")
+	genReality := flag.Bool("gen-reality", false, "Generate a REALITY x25519 keypair and exit")
 	flag.Parse()
+
+	if *genReality {
+		priv, pub, err := transport.GenerateRealityKeypair()
+		if err != nil {
+			log.Fatalf("Failed to generate REALITY keypair: %v", err)
+		}
+		log.Printf("private_key (server): %s", priv)
+		log.Printf("public_key  (client): %s", pub)
+		return
+	}
 
 	if *genConfig {
 		generateDefaultConfig(*configPath)

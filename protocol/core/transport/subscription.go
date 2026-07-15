@@ -353,6 +353,8 @@ func normalizeTransportPreference(transport string) string {
 		return "tls"
 	case "quic":
 		return "quic"
+	case "reality":
+		return "reality"
 	case "any", "auto":
 		return "auto"
 	default:
@@ -367,6 +369,15 @@ func buildTransportVariants(base ServerEntry, preferredTransport string) []Serve
 	}
 	if primary == "" {
 		primary = "tls"
+	}
+
+	if primary == "reality" {
+		variant := base
+		variant.Transport = "reality"
+		if variant.Weight <= 0 {
+			variant.Weight = 1
+		}
+		return []ServerEntry{variant}
 	}
 
 	order := []string{"tls", "quic"}
