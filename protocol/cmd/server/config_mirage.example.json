@@ -2,14 +2,13 @@
     "bind_address": ":443",
     "sni": "cdn.your-domain.com",
     "transport": "mirage",
+    "tls": {
+        "cert_file": "/etc/ssl/fullchain.pem",
+        "key_file": "/etc/ssl/privkey.pem"
+    },
     "mirage": {
         "enabled": true,
         "path": "/v2/media/segments"
-    },
-    "camouflage": {
-        "enabled": false,
-        "cert_file": "/etc/ssl/fullchain.pem",
-        "key_file": "/etc/ssl/privkey.pem"
     },
     "users": [
         {

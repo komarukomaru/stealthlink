@@ -141,12 +141,27 @@ Connect the client with the matching `public_key` and `short_id`:
 
 #### MIRAGE setup
 
-Server config uses `transport: "mirage"` with an optional `path` (see `cmd/server/config_mirage.example.json`). When fronting behind a CDN, terminate TLS at the CDN and give the origin a real certificate via `camouflage.cert_file` / `camouflage.key_file`.
+Server config uses `transport: "mirage"` with an optional `path` (see `cmd/server/config_mirage.example.json`). When fronting behind a CDN, terminate TLS at the CDN and give the origin a real certificate via the `tls` section (see below).
 
 ```bash
 ./client -server "cdn.your-domain.com:443" -transport mirage -psk "YOUR-PSK" \
   -sni "cdn.your-domain.com" -mirage-path "/v2/media/segments"
 ```
+
+#### Custom TLS certificate
+
+By default every TCP transport (`tls`, `mirage`, ...) generates a blended self-signed certificate. To serve your own certificate instead — required for CDN "Full (strict)" mode or a direct client without `-insecure` — set the top-level `tls` section. It applies to both the plain `tls` transport and `mirage`:
+
+```json
+{
+    "tls": {
+        "cert_file": "/etc/ssl/fullchain.pem",
+        "key_file": "/etc/ssl/privkey.pem"
+    }
+}
+```
+
+A certificate set directly on `camouflage.cert_file` still takes precedence when present.
 
 ### Server
 The server is configured via a JSON file. See `cmd/server/config.example.json` for a complete example.
