@@ -11,6 +11,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"net/http"
 	"net/url"
 	"strconv"
 	"sync"
@@ -25,6 +26,7 @@ type ServerConfig struct {
 	Transport   string
 	Camouflage  CamouflageConfig
 	Reality     RealityConfig
+	Mirage      MirageConfig
 	Users       []*UserRecord
 	FirewallCfg FirewallConfig
 	PaddingCfg  PaddingConfig
@@ -61,6 +63,8 @@ func (s *Server) Start() error {
 	switch s.config.Transport {
 	case "reality":
 		return s.startReality()
+	case "mirage":
+		return s.startMirage()
 	case "tls":
 		return s.startTLS()
 	case "quic":
@@ -108,6 +112,33 @@ func (s *Server) startTLS() error {
 		}
 		go s.handleTLSConnectionWrapped(conn, tlsConfig)
 	}
+}
+
+func (s *Server) startMirage() error {
+	handler := new_mirage_handler(s.auth, s.config.Mirage.Path, func(conn net.Conn, session *AuthSession) {
+		s.handleDirectConnection(conn, session)
+	})
+
+	tlsConfig, err := s.generateTLSConfigForTransport("tls")
+	if err != nil {
+		return err
+	}
+
+	listener, err := net.Listen("tcp", s.config.BindAddress)
+	if err != nil {
+		return err
+	}
+
+	srv := &http.Server{
+		Handler:      handler,
+		TLSConfig:    tlsConfig,
+		ReadTimeout:  0,
+		WriteTimeout: 0,
+		IdleTimeout:  90 * time.Second,
+	}
+
+	log.Printf("[Server] MIRAGE server listening on %s (path=%s)", s.config.BindAddress, mirage_normalize_path(s.config.Mirage.Path))
+	return srv.Serve(tls.NewListener(listener, tlsConfig))
 }
 
 func (s *Server) startReality() error {

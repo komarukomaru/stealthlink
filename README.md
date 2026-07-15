@@ -135,6 +135,19 @@ Connect the client with the matching `public_key` and `short_id`:
   -reality-key "<public_key>" -reality-short-id "0011223344556677"
 ```
 
+- **`mirage`**: Tunnel carried inside ordinary HTTP requests, designed to pass cleanly through a CDN.
+  - *Best for*: Fronting behind a CDN (e.g. Cloudflare) where the traffic must look like plain HTTP to the CDN itself.
+  - *Behavior*: A long-lived `GET` streams the downlink (server → client) as a chunked response; the uplink (client → server) is a sequence of short `POST` requests. Authentication rides in the `Authorization: Bearer` header. Non-tunnel requests get a plain `404` page. Point the client at the CDN hostname and the CDN forwards to the origin.
+
+#### MIRAGE setup
+
+Server config uses `transport: "mirage"` with an optional `path` (see `cmd/server/config_mirage.example.json`). When fronting behind a CDN, terminate TLS at the CDN and give the origin a real certificate via `camouflage.cert_file` / `camouflage.key_file`.
+
+```bash
+./client -server "cdn.your-domain.com:443" -transport mirage -psk "YOUR-PSK" \
+  -sni "cdn.your-domain.com" -mirage-path "/v2/media/segments"
+```
+
 ### Server
 The server is configured via a JSON file. See `cmd/server/config.example.json` for a complete example.
 

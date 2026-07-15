@@ -19,6 +19,8 @@ type Config struct {
 
 	Reality transport.RealityConfig `json:"reality"`
 
+	Mirage transport.MirageConfig `json:"mirage"`
+
 	Users []*transport.UserRecord `json:"users"`
 
 	Firewall transport.FirewallConfig `json:"firewall"`
@@ -131,6 +133,7 @@ func (c *Config) ToServerConfig() transport.ServerConfig {
 		Transport:   c.Transport,
 		Camouflage:  c.Camouflage,
 		Reality:     c.Reality,
+		Mirage:      c.Mirage,
 		Users:       c.Users,
 		FirewallCfg: c.Firewall,
 		PaddingCfg:  paddingCfg,
