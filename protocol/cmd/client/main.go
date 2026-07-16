@@ -30,6 +30,7 @@ func main() {
 	realityShortID := flag.String("reality-short-id", "", "REALITY short id (hex) for transport=reality")
 	miragePath := flag.String("mirage-path", "", "HTTP path prefix for transport=mirage (must match server)")
 	masquePath := flag.String("masque-path", "", "HTTP/3 CONNECT path for transport=masque (must match server)")
+	webrtcPath := flag.String("webrtc-path", "", "HTTPS signaling path for transport=webrtc (must match server)")
 	flag.Parse()
 
 	var subscription *transport.SubscriptionConfig
@@ -73,6 +74,7 @@ func main() {
 		RealityShortID:   *realityShortID,
 		MiragePath:       *miragePath,
 		MasquePath:       *masquePath,
+		WebRTCPath:       *webrtcPath,
 	}
 
 	client := transport.NewClient(config)

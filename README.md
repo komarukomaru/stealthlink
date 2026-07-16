@@ -173,6 +173,19 @@ Server config uses `transport: "redstone"` (default port 25565), with optional `
 ./client -server "1.2.3.4:25565" -transport redstone -psk "YOUR-PSK" -sni "mc.example.com"
 ```
 
+- **`webrtc`**: Tunnels over a WebRTC data channel, so the bulk traffic looks like a video/voice call (DTLS/SCTP over UDP).
+  - *Best for*: Resistance to blocking — dropping it means dropping real-time calls.
+  - *Behavior*: The client exchanges an SDP offer/answer with the server over a small HTTPS signaling endpoint (authenticated with the PSK), establishes a peer connection (ICE, optionally via STUN), and opens one data channel per outbound target. A server with a public IP needs no TURN.
+
+#### WebRTC setup
+
+Server config uses `transport: "webrtc"` with an optional signaling `path` and `stun_servers` (see `cmd/server/config_webrtc.example.json`). Give the signaling endpoint a real certificate via the `tls` section.
+
+```bash
+./client -server "rtc.example.com:443" -transport webrtc -psk "YOUR-PSK" \
+  -sni "rtc.example.com" -webrtc-path "/rtc/o"
+```
+
 #### Custom TLS certificate
 
 By default every TCP transport (`tls`, `mirage`, ...) generates a blended self-signed certificate. To serve your own certificate instead — required for CDN "Full (strict)" mode or a direct client without `-insecure` — set the top-level `tls` section. It applies to both the plain `tls` transport and `mirage`:
