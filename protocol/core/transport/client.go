@@ -248,6 +248,8 @@ func (c *Client) connect(server *ServerEntry) error {
 		return c.connectMirage(server, psk)
 	case "masque":
 		return c.connectMasque(server, psk)
+	case "redstone":
+		return c.connectRedstone(server, psk)
 	case "quic":
 		fingerprint := server.Fingerprint
 		if fingerprint == "" {
@@ -355,6 +357,36 @@ func (c *Client) connectTLS(server *ServerEntry, psk string) error {
 		conn, err := DialVPNServer(serverAddr, sni, psk, secretPath, fingerprint, addrType, addr, port)
 		if err != nil {
 			log.Printf("[Client] Dial failed %s:%d: %v", addr, port, err)
+		}
+		return conn, err
+	})
+
+	c.mu.Lock()
+	c.setActiveServerLocked(server, psk)
+	c.connected = true
+	c.mu.Unlock()
+
+	return nil
+}
+
+func (c *Client) connectRedstone(server *ServerEntry, psk string) error {
+	sni := server.SNI
+	if sni == "" {
+		sni = c.config.SNI
+	}
+	if sni == "" {
+		host, _, _ := net.SplitHostPort(server.Address)
+		sni = host
+	}
+
+	target := server.Address
+
+	log.Printf("[Client] REDSTONE (Minecraft) mode to %s (host: %s)", target, sni)
+
+	c.proxy.SetDialer(func(addrType byte, addr string, port uint16) (net.Conn, error) {
+		conn, err := redstone_dial(target, sni, psk, addrType, addr, port)
+		if err != nil {
+			log.Printf("[Client] Redstone dial failed %s:%d: %v", addr, port, err)
 		}
 		return conn, err
 	})

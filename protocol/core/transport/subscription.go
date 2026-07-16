@@ -359,6 +359,8 @@ func normalizeTransportPreference(transport string) string {
 		return "mirage"
 	case "masque":
 		return "masque"
+	case "redstone":
+		return "redstone"
 	case "any", "auto":
 		return "auto"
 	default:
@@ -375,7 +377,7 @@ func buildTransportVariants(base ServerEntry, preferredTransport string) []Serve
 		primary = "tls"
 	}
 
-	if primary == "reality" || primary == "mirage" || primary == "masque" {
+	if primary == "reality" || primary == "mirage" || primary == "masque" || primary == "redstone" {
 		variant := base
 		variant.Transport = primary
 		if variant.Weight <= 0 {

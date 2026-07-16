@@ -161,6 +161,18 @@ Server config uses `transport: "masque"` with an optional `path` (see `cmd/serve
   -sni "www.microsoft.com" -masque-path "/.well-known/masque/udp/"
 ```
 
+- **`redstone`**: Disguises the tunnel as Minecraft: Java Edition traffic.
+  - *Best for*: Standing out from the crowd of HTTPS-lookalike protocols — the flow looks like a game, not a web request.
+  - *Behavior*: The client performs a real Minecraft handshake and login; tunnel data then rides inside length-prefixed Minecraft packets. A server-list ping (status request) is answered with a plausible MOTD, version and player count, so an active prober connecting with a real Minecraft client sees a live server.
+
+#### REDSTONE setup
+
+Server config uses `transport: "redstone"` (default port 25565), with optional `motd`, `version` and `protocol_version` (see `cmd/server/config_redstone.example.json`).
+
+```bash
+./client -server "1.2.3.4:25565" -transport redstone -psk "YOUR-PSK" -sni "mc.example.com"
+```
+
 #### Custom TLS certificate
 
 By default every TCP transport (`tls`, `mirage`, ...) generates a blended self-signed certificate. To serve your own certificate instead — required for CDN "Full (strict)" mode or a direct client without `-insecure` — set the top-level `tls` section. It applies to both the plain `tls` transport and `mirage`:
