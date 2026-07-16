@@ -29,6 +29,8 @@ type ServerConfig struct {
 	Reality     RealityConfig
 	Mirage      MirageConfig
 	Masque      MasqueConfig
+	Redstone    RedstoneConfig
+	WebRTC      WebRTCConfig
 	Users       []*UserRecord
 	FirewallCfg FirewallConfig
 	PaddingCfg  PaddingConfig
@@ -69,6 +71,10 @@ func (s *Server) Start() error {
 		return s.startMirage()
 	case "masque":
 		return s.startMasque()
+	case "redstone":
+		return s.startRedstone()
+	case "webrtc":
+		return s.startWebRTC()
 	case "tls":
 		return s.startTLS()
 	case "quic":
@@ -115,6 +121,55 @@ func (s *Server) startTLS() error {
 			continue
 		}
 		go s.handleTLSConnectionWrapped(conn, tlsConfig)
+	}
+}
+
+func (s *Server) startWebRTC() error {
+	tlsConfig, err := s.generateTLSConfigForTransport("tls")
+	if err != nil {
+		return err
+	}
+
+	listener, err := net.Listen("tcp", s.config.BindAddress)
+	if err != nil {
+		return err
+	}
+
+	handler := &webrtc_handler{
+		auth: s.auth,
+		path: webrtc_normalize_path(s.config.WebRTC.Path),
+		stun: s.config.WebRTC.STUNServers,
+		onSession: func(conn net.Conn, session *AuthSession) {
+			s.handleDirectConnection(conn, session)
+		},
+	}
+
+	srv := &http.Server{
+		Handler:     handler,
+		TLSConfig:   tlsConfig,
+		IdleTimeout: 90 * time.Second,
+	}
+
+	log.Printf("[Server] WebRTC signaling server listening on %s (path=%s)", s.config.BindAddress, handler.path)
+	return srv.Serve(tls.NewListener(listener, tlsConfig))
+}
+
+func (s *Server) startRedstone() error {
+	listener, err := net.Listen("tcp", s.config.BindAddress)
+	if err != nil {
+		return err
+	}
+
+	log.Printf("[Server] REDSTONE (Minecraft) server listening on %s", s.config.BindAddress)
+
+	for {
+		conn, err := listener.Accept()
+		if err != nil {
+			continue
+		}
+		go redstone_serve(conn, s.config.Redstone, func(c net.Conn) {
+			s.handleTLSConnection(c)
+		})
 	}
 }
 

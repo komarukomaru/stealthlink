@@ -39,8 +39,10 @@ type ClientConfig struct {
 	RealityPublicKey string
 	RealityShortID   string
 
-	MiragePath string
-	MasquePath string
+	MiragePath  string
+	MasquePath  string
+	WebRTCPath  string
+	WebRTCSTUN  []string
 }
 
 type Client struct {
@@ -248,6 +250,10 @@ func (c *Client) connect(server *ServerEntry) error {
 		return c.connectMirage(server, psk)
 	case "masque":
 		return c.connectMasque(server, psk)
+	case "redstone":
+		return c.connectRedstone(server, psk)
+	case "webrtc":
+		return c.connectWebRTC(server, psk)
 	case "quic":
 		fingerprint := server.Fingerprint
 		if fingerprint == "" {
@@ -355,6 +361,80 @@ func (c *Client) connectTLS(server *ServerEntry, psk string) error {
 		conn, err := DialVPNServer(serverAddr, sni, psk, secretPath, fingerprint, addrType, addr, port)
 		if err != nil {
 			log.Printf("[Client] Dial failed %s:%d: %v", addr, port, err)
+		}
+		return conn, err
+	})
+
+	c.mu.Lock()
+	c.setActiveServerLocked(server, psk)
+	c.connected = true
+	c.mu.Unlock()
+
+	return nil
+}
+
+func (c *Client) connectWebRTC(server *ServerEntry, psk string) error {
+	sni := server.SNI
+	if sni == "" {
+		sni = c.config.SNI
+	}
+	if sni == "" {
+		host, _, _ := net.SplitHostPort(server.Address)
+		sni = host
+	}
+
+	fingerprint := server.Fingerprint
+	if fingerprint == "" {
+		fingerprint = c.config.Fingerprint
+	}
+
+	stun := c.config.WebRTCSTUN
+	if len(stun) == 0 {
+		stun = webrtc_default_stun
+	}
+
+	client, err := webrtc_dial(server.Address, sni, c.config.WebRTCPath, fingerprint, psk, stun, c.config.InsecureSkip)
+	if err != nil {
+		return err
+	}
+
+	log.Printf("[Client] WebRTC mode to %s (SNI: %s)", server.Address, sni)
+
+	c.mu.Lock()
+	c.setActiveServerLocked(server, psk)
+	c.transportCloser = client
+	c.connected = true
+	c.mu.Unlock()
+
+	c.proxy.SetDialer(func(addrType byte, addr string, port uint16) (net.Conn, error) {
+		conn, err := client.open(addrType, addr, port)
+		if err != nil {
+			log.Printf("[Client] WebRTC dial failed %s:%d: %v", addr, port, err)
+		}
+		return conn, err
+	})
+
+	return nil
+}
+
+func (c *Client) connectRedstone(server *ServerEntry, psk string) error {
+	sni := server.SNI
+	if sni == "" {
+		sni = c.config.SNI
+	}
+	if sni == "" {
+		host, _, _ := net.SplitHostPort(server.Address)
+		sni = host
+	}
+
+	target := server.Address
+
+	log.Printf("[Client] REDSTONE (Minecraft) mode to %s (host: %s)", target, sni)
+
+	c.proxy.SetDialer(func(addrType byte, addr string, port uint16) (net.Conn, error) {
+		conn, err := redstone_dial(target, sni, psk, addrType, addr, port)
+		if err != nil {
+			log.Printf("[Client] Redstone dial failed %s:%d: %v", addr, port, err)
 		}
 		return conn, err
 	})

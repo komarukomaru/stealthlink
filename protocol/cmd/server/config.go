@@ -28,6 +28,10 @@ type Config struct {
 
 	Masque transport.MasqueConfig `json:"masque"`
 
+	Redstone transport.RedstoneConfig `json:"redstone"`
+
+	WebRTC transport.WebRTCConfig `json:"webrtc"`
+
 	Users []*transport.UserRecord `json:"users"`
 
 	Firewall transport.FirewallConfig `json:"firewall"`
@@ -148,6 +152,8 @@ func (c *Config) ToServerConfig() transport.ServerConfig {
 		Reality:     c.Reality,
 		Mirage:      c.Mirage,
 		Masque:      c.Masque,
+		Redstone:    c.Redstone,
+		WebRTC:      c.WebRTC,
 		Users:       c.Users,
 		FirewallCfg: c.Firewall,
 		PaddingCfg:  paddingCfg,
