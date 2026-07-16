@@ -15,11 +15,18 @@ type Config struct {
 	SNI         string `json:"sni"`
 	Transport   string `json:"transport"`
 
+	TLS struct {
+		CertFile string `json:"cert_file"`
+		KeyFile  string `json:"key_file"`
+	} `json:"tls"`
+
 	Camouflage transport.CamouflageConfig `json:"camouflage"`
 
 	Reality transport.RealityConfig `json:"reality"`
 
 	Mirage transport.MirageConfig `json:"mirage"`
+
+	Masque transport.MasqueConfig `json:"masque"`
 
 	Users []*transport.UserRecord `json:"users"`
 
@@ -127,13 +134,20 @@ func (c *Config) ToServerConfig() transport.ServerConfig {
 	stealthCfg.ProtocolPolymorphism = c.Stealth.ProtocolPolymorphism
 	stealthCfg.AdaptiveThrottling = c.Stealth.AdaptiveThrottling
 
+	camouflageCfg := c.Camouflage
+	if camouflageCfg.CertFile == "" && camouflageCfg.KeyFile == "" && c.TLS.CertFile != "" && c.TLS.KeyFile != "" {
+		camouflageCfg.CertFile = c.TLS.CertFile
+		camouflageCfg.KeyFile = c.TLS.KeyFile
+	}
+
 	return transport.ServerConfig{
 		BindAddress: c.BindAddress,
 		SNI:         c.SNI,
 		Transport:   c.Transport,
-		Camouflage:  c.Camouflage,
+		Camouflage:  camouflageCfg,
 		Reality:     c.Reality,
 		Mirage:      c.Mirage,
+		Masque:      c.Masque,
 		Users:       c.Users,
 		FirewallCfg: c.Firewall,
 		PaddingCfg:  paddingCfg,

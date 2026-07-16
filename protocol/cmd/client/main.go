@@ -29,6 +29,7 @@ func main() {
 	realityPubKey := flag.String("reality-key", "", "REALITY server public key (base64) for transport=reality")
 	realityShortID := flag.String("reality-short-id", "", "REALITY short id (hex) for transport=reality")
 	miragePath := flag.String("mirage-path", "", "HTTP path prefix for transport=mirage (must match server)")
+	masquePath := flag.String("masque-path", "", "HTTP/3 CONNECT path for transport=masque (must match server)")
 	flag.Parse()
 
 	var subscription *transport.SubscriptionConfig
@@ -71,6 +72,7 @@ func main() {
 		RealityPublicKey: *realityPubKey,
 		RealityShortID:   *realityShortID,
 		MiragePath:       *miragePath,
+		MasquePath:       *masquePath,
 	}
 
 	client := transport.NewClient(config)

@@ -1,14 +1,10 @@
 {
     "bind_address": ":443",
-    "sni": "cdn.your-domain.com",
-    "transport": "mirage",
-    "tls": {
-        "cert_file": "/etc/ssl/fullchain.pem",
-        "key_file": "/etc/ssl/privkey.pem"
-    },
-    "mirage": {
+    "sni": "www.microsoft.com",
+    "transport": "masque",
+    "masque": {
         "enabled": true,
-        "path": "/v2/media/segments"
+        "path": "/.well-known/masque/udp/"
     },
     "users": [
         {

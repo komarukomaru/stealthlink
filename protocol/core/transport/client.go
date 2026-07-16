@@ -19,6 +19,7 @@ import (
 	"time"
 
 	quic "github.com/quic-go/quic-go"
+	"github.com/quic-go/quic-go/http3"
 )
 
 type ClientConfig struct {
@@ -39,6 +40,7 @@ type ClientConfig struct {
 	RealityShortID   string
 
 	MiragePath string
+	MasquePath string
 }
 
 type Client struct {
@@ -51,6 +53,7 @@ type Client struct {
 	quicConn        *quic.Conn
 	quicTransport   io.Closer
 	transportCloser io.Closer
+	masqueClient    *http3.ClientConn
 	writer          *FrameWriter
 	reader          *FrameReader
 	activeServer    *ServerEntry
@@ -243,11 +246,58 @@ func (c *Client) connect(server *ServerEntry) error {
 		return c.connectReality(server, psk)
 	case "mirage":
 		return c.connectMirage(server, psk)
+	case "masque":
+		return c.connectMasque(server, psk)
 	case "quic":
+		fingerprint := server.Fingerprint
+		if fingerprint == "" {
+			fingerprint = c.config.Fingerprint
+		}
+		if fingerprint != "" {
+			return c.connectQUICUTLS(server, psk, fingerprint)
+		}
 		return c.connectQUIC(server, psk)
 	default:
 		return c.connectTLS(server, psk)
 	}
+}
+
+func (c *Client) connectQUICUTLS(server *ServerEntry, psk, fingerprint string) error {
+	sni := server.SNI
+	if sni == "" {
+		sni = c.config.SNI
+	}
+	if sni == "" {
+		host, _, _ := net.SplitHostPort(server.Address)
+		sni = host
+	}
+
+	sess, err := uquic_dial(server.Address, sni, fingerprint, c.config.InsecureSkip)
+	if err != nil {
+		return err
+	}
+	if err := uquic_authenticate(sess, psk); err != nil {
+		sess.Close()
+		return err
+	}
+
+	log.Printf("[Client] QUIC (uTLS %s) mode to %s (SNI: %s)", fingerprint, server.Address, sni)
+
+	c.mu.Lock()
+	c.setActiveServerLocked(server, psk)
+	c.transportCloser = sess
+	c.connected = true
+	c.mu.Unlock()
+
+	c.proxy.SetDialer(func(addrType byte, addr string, port uint16) (net.Conn, error) {
+		conn, err := uquic_open_target(sess, addrType, addr, port)
+		if err != nil {
+			log.Printf("[Client] QUIC(uTLS) dial failed %s:%d: %v", addr, port, err)
+		}
+		return conn, err
+	})
+
+	return nil
 }
 
 func (c *Client) connectCandidate(server *ServerEntry, persistent bool) error {
@@ -313,6 +363,45 @@ func (c *Client) connectTLS(server *ServerEntry, psk string) error {
 	c.setActiveServerLocked(server, psk)
 	c.connected = true
 	c.mu.Unlock()
+
+	return nil
+}
+
+func (c *Client) connectMasque(server *ServerEntry, psk string) error {
+	sni := server.SNI
+	if sni == "" {
+		sni = c.config.SNI
+	}
+	if sni == "" {
+		host, _, _ := net.SplitHostPort(server.Address)
+		sni = host
+	}
+
+	path := c.config.MasquePath
+	insecure := c.config.InsecureSkip
+
+	cc, qconn, tr, err := masque_new_client_conn(server.Address, sni, insecure)
+	if err != nil {
+		return err
+	}
+
+	log.Printf("[Client] MASQUE (HTTP/3) mode to %s (SNI: %s)", server.Address, sni)
+
+	c.mu.Lock()
+	c.setActiveServerLocked(server, psk)
+	c.quicConn = qconn
+	c.quicTransport = tr
+	c.masqueClient = cc
+	c.connected = true
+	c.mu.Unlock()
+
+	c.proxy.SetDialer(func(addrType byte, addr string, port uint16) (net.Conn, error) {
+		conn, err := masque_open_stream(cc, sni, path, psk, addrType, addr, port)
+		if err != nil {
+			log.Printf("[Client] Masque dial failed %s:%d: %v", addr, port, err)
+		}
+		return conn, err
+	})
 
 	return nil
 }
@@ -782,6 +871,7 @@ func (c *Client) resetTransportState() {
 	c.transportCloser = nil
 	c.quicConn = nil
 	c.quicTransport = nil
+	c.masqueClient = nil
 	c.activeServer = nil
 	c.activePSK = ""
 	c.frameLoopActive = false

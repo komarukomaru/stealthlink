@@ -107,7 +107,7 @@ The server supports strict transport selection to optimize for specific network 
   - *Behavior*: Listens ONLY on TCP. UDP/QUIC is disabled.
 - **`quic`**: HTTP/3 over QUIC (UDP).
   - *Best for*: High performance, low latency, lossy networks.
-  - *Behavior*: Listens ONLY on UDP. TCP/TLS fallback is disabled.
+  - *Behavior*: Listens ONLY on UDP. TCP/TLS fallback is disabled. When the client is given a `-fingerprint`, the QUIC Initial packet (ClientHello) is mimicked after a real Chrome or Firefox QUIC handshake via uTLS, instead of the default Go fingerprint.
 - **`any`**: Dual-stack mode.
   - *Best for*: Flexibility. Clients can choose their preferred transport.
   - *Behavior*: Listens on BOTH UDP (QUIC) and TCP (TLS).
@@ -141,12 +141,40 @@ Connect the client with the matching `public_key` and `short_id`:
 
 #### MIRAGE setup
 
-Server config uses `transport: "mirage"` with an optional `path` (see `cmd/server/config_mirage.example.json`). When fronting behind a CDN, terminate TLS at the CDN and give the origin a real certificate via `camouflage.cert_file` / `camouflage.key_file`.
+Server config uses `transport: "mirage"` with an optional `path` (see `cmd/server/config_mirage.example.json`). When fronting behind a CDN, terminate TLS at the CDN and give the origin a real certificate via the `tls` section (see below).
 
 ```bash
 ./client -server "cdn.your-domain.com:443" -transport mirage -psk "YOUR-PSK" \
   -sni "cdn.your-domain.com" -mirage-path "/v2/media/segments"
 ```
+
+- **`masque`**: Genuine HTTP/3 tunnel over QUIC using an Extended CONNECT request (MASQUE-style).
+  - *Best for*: UDP-friendly networks where the traffic must survive inspection by a probe that speaks real HTTP/3.
+  - *Behavior*: The client opens a real HTTP/3 connection (SETTINGS/HEADERS/DATA frames) and issues a `CONNECT` request with `:protocol = connect-udp`; the server hijacks the stream and tunnels over it. Unlike the raw `quic` transport, an HTTP/3-speaking prober sees a well-formed h3 endpoint. Authentication rides in the `Authorization: Bearer` header; non-CONNECT requests get a plain `404`.
+
+#### MASQUE setup
+
+Server config uses `transport: "masque"` with an optional `path` (see `cmd/server/config_masque.example.json`).
+
+```bash
+./client -server "1.2.3.4:443" -transport masque -psk "YOUR-PSK" \
+  -sni "www.microsoft.com" -masque-path "/.well-known/masque/udp/"
+```
+
+#### Custom TLS certificate
+
+By default every TCP transport (`tls`, `mirage`, ...) generates a blended self-signed certificate. To serve your own certificate instead — required for CDN "Full (strict)" mode or a direct client without `-insecure` — set the top-level `tls` section. It applies to both the plain `tls` transport and `mirage`:
+
+```json
+{
+    "tls": {
+        "cert_file": "/etc/ssl/fullchain.pem",
+        "key_file": "/etc/ssl/privkey.pem"
+    }
+}
+```
+
+A certificate set directly on `camouflage.cert_file` still takes precedence when present.
 
 ### Server
 The server is configured via a JSON file. See `cmd/server/config.example.json` for a complete example.
