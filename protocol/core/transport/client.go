@@ -39,10 +39,15 @@ type ClientConfig struct {
 	RealityPublicKey string
 	RealityShortID   string
 
-	MiragePath  string
-	MasquePath  string
-	WebRTCPath  string
-	WebRTCSTUN  []string
+	MiragePath string
+	MasquePath string
+	WebRTCPath string
+	WebRTCSTUN []string
+
+	VlessUUID      string
+	TrojanPassword string
+	XHTTPCfg       XHTTPConfig
+	GRPCCfg        GRPCConfig
 }
 
 type Client struct {
@@ -254,6 +259,18 @@ func (c *Client) connect(server *ServerEntry) error {
 		return c.connectRedstone(server, psk)
 	case "webrtc":
 		return c.connectWebRTC(server, psk)
+	case "vless-xhttp":
+		uuid := server.UUID
+		if uuid == "" {
+			uuid = c.config.VlessUUID
+		}
+		return c.connectVlessXHTTP(server, uuid)
+	case "trojan-grpc":
+		password := server.TrojanPassword
+		if password == "" {
+			password = c.config.TrojanPassword
+		}
+		return c.connectTrojanGRPC(server, password)
 	case "quic":
 		fingerprint := server.Fingerprint
 		if fingerprint == "" {
@@ -413,6 +430,114 @@ func (c *Client) connectWebRTC(server *ServerEntry, psk string) error {
 		}
 		return conn, err
 	})
+
+	return nil
+}
+
+func (c *Client) connectVlessXHTTP(server *ServerEntry, uuidStr string) error {
+	sni := server.SNI
+	if sni == "" {
+		sni = c.config.SNI
+	}
+	if sni == "" {
+		host, _, _ := net.SplitHostPort(server.Address)
+		sni = host
+	}
+
+	uuid, err := parseVlessUUID(uuidStr)
+	if err != nil {
+		return fmt.Errorf("vless: %w", err)
+	}
+
+	xhttpCfg := c.config.XHTTPCfg
+	if server.XHTTP != nil {
+		xhttpCfg = *server.XHTTP
+	}
+
+	fingerprint := server.Fingerprint
+	if fingerprint == "" {
+		fingerprint = c.config.Fingerprint
+	}
+
+	serverAddr := server.Address
+	insecure := c.config.InsecureSkip
+
+	probe, err := xhttp_dial(serverAddr, sni, xhttpCfg, fingerprint, insecure)
+	if err != nil {
+		return fmt.Errorf("xhttp dial failed: %w", err)
+	}
+	probe.Close()
+
+	log.Printf("[Client] VLESS/XHTTP mode to %s (SNI: %s, mode: %s)", serverAddr, sni, xhttp_resolve_mode(xhttpCfg.Mode))
+
+	c.proxy.SetDialer(func(addrType byte, addr string, port uint16) (net.Conn, error) {
+		conn, err := xhttp_dial(serverAddr, sni, xhttpCfg, fingerprint, insecure)
+		if err != nil {
+			log.Printf("[Client] VLESS/XHTTP dial failed %s:%d: %v", addr, port, err)
+			return nil, err
+		}
+		return vless_wrap_client(conn, uuid, socks5ToVlessAddrType(addrType), addr, port), nil
+	})
+
+	c.mu.Lock()
+	c.setActiveServerLocked(server, "")
+	c.connected = true
+	c.mu.Unlock()
+
+	return nil
+}
+
+func (c *Client) connectTrojanGRPC(server *ServerEntry, password string) error {
+	sni := server.SNI
+	if sni == "" {
+		sni = c.config.SNI
+	}
+	if sni == "" {
+		host, _, _ := net.SplitHostPort(server.Address)
+		sni = host
+	}
+	if password == "" {
+		return fmt.Errorf("trojan: no password configured")
+	}
+
+	grpcCfg := c.config.GRPCCfg
+	if server.GRPC != nil {
+		grpcCfg = *server.GRPC
+	}
+
+	fingerprint := server.Fingerprint
+	if fingerprint == "" {
+		fingerprint = c.config.Fingerprint
+	}
+
+	gc, err := grpc_dial(server.Address, sni, grpcCfg, fingerprint, c.config.InsecureSkip)
+	if err != nil {
+		return err
+	}
+
+	probe, err := gc.open()
+	if err != nil {
+		gc.Close()
+		return fmt.Errorf("grpc probe stream failed: %w", err)
+	}
+	probe.Close()
+
+	log.Printf("[Client] Trojan/gRPC mode to %s (SNI: %s, service: %s)", server.Address, sni, grpc_service_name(grpcCfg))
+
+	c.proxy.SetDialer(func(addrType byte, addr string, port uint16) (net.Conn, error) {
+		conn, err := gc.open()
+		if err != nil {
+			log.Printf("[Client] Trojan/gRPC dial failed %s:%d: %v", addr, port, err)
+			return nil, err
+		}
+		return trojan_wrap_client(conn, password, addrType, addr, port), nil
+	})
+
+	c.mu.Lock()
+	c.setActiveServerLocked(server, "")
+	c.transportCloser = gc
+	c.connected = true
+	c.mu.Unlock()
 
 	return nil
 }

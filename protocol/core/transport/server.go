@@ -31,6 +31,10 @@ type ServerConfig struct {
 	Masque      MasqueConfig
 	Redstone    RedstoneConfig
 	WebRTC      WebRTCConfig
+	Vless       VlessConfig
+	Trojan      TrojanConfig
+	XHTTP       XHTTPConfig
+	GRPC        GRPCConfig
 	Users       []*UserRecord
 	FirewallCfg FirewallConfig
 	PaddingCfg  PaddingConfig
@@ -38,10 +42,12 @@ type ServerConfig struct {
 }
 
 type Server struct {
-	config       ServerConfig
-	auth         *AuthManager
-	firewall     *Firewall
-	replayFilter *ReplayFilter
+	config        ServerConfig
+	auth          *AuthManager
+	firewall      *Firewall
+	replayFilter  *ReplayFilter
+	vlessClients  *vlessClientMap
+	trojanClients *trojanClientMap
 
 	mu       sync.RWMutex
 	sessions map[string]int
@@ -49,11 +55,13 @@ type Server struct {
 
 func NewServer(config ServerConfig) *Server {
 	return &Server{
-		config:       config,
-		auth:         NewAuthManager(config.Users),
-		firewall:     NewFirewall(config.FirewallCfg),
-		replayFilter: NewReplayFilter(100000, 5*time.Minute),
-		sessions:     make(map[string]int),
+		config:        config,
+		auth:          NewAuthManager(config.Users),
+		firewall:      NewFirewall(config.FirewallCfg),
+		replayFilter:  NewReplayFilter(100000, 5*time.Minute),
+		vlessClients:  newVlessClientMap(config.Vless),
+		trojanClients: newTrojanClientMap(config.Trojan),
+		sessions:      make(map[string]int),
 	}
 }
 
@@ -75,6 +83,10 @@ func (s *Server) Start() error {
 		return s.startRedstone()
 	case "webrtc":
 		return s.startWebRTC()
+	case "vless-xhttp":
+		return s.startVlessXHTTP()
+	case "trojan-grpc":
+		return s.startTrojanGRPC()
 	case "tls":
 		return s.startTLS()
 	case "quic":
@@ -152,6 +164,186 @@ func (s *Server) startWebRTC() error {
 
 	log.Printf("[Server] WebRTC signaling server listening on %s (path=%s)", s.config.BindAddress, handler.path)
 	return srv.Serve(tls.NewListener(listener, tlsConfig))
+}
+
+// replayGuardedListener applies the server's replay filter (TLS ClientHello
+// random reuse detection) to every accepted connection before handing it to
+// a generic net/http or gRPC server, mirroring the peek-then-check pattern
+// handleTLSConnectionWrapped already uses for the plain TLS transport.
+type replayGuardedListener struct {
+	net.Listener
+	filter *ReplayFilter
+}
+
+func (l *replayGuardedListener) Accept() (net.Conn, error) {
+	for {
+		conn, err := l.Listener.Accept()
+		if err != nil {
+			return nil, err
+		}
+
+		pConn, err := NewPeekingConn(conn, 64)
+		if err != nil {
+			conn.Close()
+			continue
+		}
+
+		peek := pConn.Peek()
+		if len(peek) > 43 && peek[0] == 0x16 {
+			if l.filter.CheckAndAdd(peek[11 : 11+32]) {
+				pConn.Close()
+				continue
+			}
+		}
+		return pConn, nil
+	}
+}
+
+func ensureALPNH2(cfg *tls.Config) {
+	for _, p := range cfg.NextProtos {
+		if p == "h2" {
+			return
+		}
+	}
+	cfg.NextProtos = append(cfg.NextProtos, "h2")
+}
+
+// relayToTarget is the shared VLESS/Trojan tail: firewall check, dial the
+// resolved target, relay. Both protocols write their own success/response
+// framing (or none, for Trojan) before calling this - from here on it's a
+// plain byte-exact bidirectional copy, same as handleDirectConnectionWithType
+// uses for the StealthLink direct-connect path. user is nil (VlessClient/
+// TrojanClient don't carry per-user port ACLs or upstream cascading in this
+// build), so only the global firewall rules (blocked ports, private ranges,
+// per-identity connection cap) apply.
+func (s *Server) relayToTarget(conn net.Conn, identity string, addrType byte, addr string, port uint16) {
+	defer conn.Close()
+
+	if !s.firewall.CheckConnection(identity, addr, port, nil) {
+		return
+	}
+	s.firewall.OnConnect(identity)
+	defer s.firewall.OnDisconnect(identity)
+
+	targetConn, err := DialTarget(addr, port, 10*time.Second)
+	if err != nil {
+		return
+	}
+	defer targetConn.Close()
+
+	BidirectionalRelay(conn, targetConn)
+}
+
+// serveTrojanDecoy is the fallback for a connection that failed Trojan
+// auth: instead of an abrupt close, it transparently relays to a
+// configured decoy backend, replaying whatever bytes trojan_accept already
+// consumed while attempting (and failing) to parse the header. This is the
+// closest equivalent, at this layer, of classic Trojan-over-TCP falling
+// through to a real website on a bad password - the outer TLS/H2 session
+// here is already gRPC, so what gets proxied is the decrypted tunnel
+// payload rather than raw TLS bytes, but the effect (no fingerprintable
+// "wrong password -> instant RST" signature) is the same. No-op if
+// Trojan.DecoyAddr isn't configured.
+func (s *Server) serveTrojanDecoy(conn net.Conn, alreadyRead []byte) {
+	defer conn.Close()
+
+	decoyAddr := s.config.Trojan.DecoyAddr
+	if decoyAddr == "" {
+		return
+	}
+
+	decoyConn, err := net.DialTimeout("tcp", decoyAddr, 10*time.Second)
+	if err != nil {
+		return
+	}
+	defer decoyConn.Close()
+	TuneTCPConn(decoyConn)
+
+	if len(alreadyRead) > 0 {
+		if _, err := decoyConn.Write(alreadyRead); err != nil {
+			return
+		}
+	}
+
+	BidirectionalRelay(conn, decoyConn)
+}
+
+func (s *Server) startVlessXHTTP() error {
+	tlsConfig, err := s.generateTLSConfigForTransport("tls")
+	if err != nil {
+		return err
+	}
+	ensureALPNH2(tlsConfig)
+
+	listener, err := net.Listen("tcp", s.config.BindAddress)
+	if err != nil {
+		return err
+	}
+	var lis net.Listener = listener
+	if s.replayFilter != nil {
+		lis = &replayGuardedListener{Listener: listener, filter: s.replayFilter}
+	}
+
+	handler := new_xhttp_handler(s.config.XHTTP.Path, s.config.XHTTP.Extra, func(conn net.Conn) {
+		client, addrType, addr, port, err := vless_accept(conn, s.vlessClients)
+		if err != nil {
+			conn.Close()
+			return
+		}
+		s.relayToTarget(conn, "vless:"+client.ID, addrType, addr, port)
+	})
+
+	srv := &http.Server{
+		Handler:     handler,
+		TLSConfig:   tlsConfig,
+		IdleTimeout: 90 * time.Second,
+	}
+
+	log.Printf("[Server] VLESS/XHTTP server listening on %s (path=%s, mode=%s)", s.config.BindAddress, xhttp_normalize_path(s.config.XHTTP.Path), s.config.XHTTP.Mode)
+	return srv.Serve(tls.NewListener(lis, tlsConfig))
+}
+
+func (s *Server) startTrojanGRPC() error {
+	listener, err := net.Listen("tcp", s.config.BindAddress)
+	if err != nil {
+		return err
+	}
+
+	var tlsConfig *tls.Config
+	var lis net.Listener = listener
+
+	if grpc_security(s.config.GRPC) == "reality" {
+		// REALITY does its own TLS-equivalent handshake per connection
+		// (via realityServerCreds, wired inside grpc_new_server) - no
+		// tlsConfig/replay-wrapped listener needed at this layer, the
+		// custom credentials handle peeking, replay checking, and
+		// falling through to Reality.Dest themselves.
+	} else {
+		tlsConfig, err = s.generateTLSConfigForTransport("tls")
+		if err != nil {
+			return err
+		}
+		ensureALPNH2(tlsConfig)
+		if s.replayFilter != nil {
+			lis = &replayGuardedListener{Listener: listener, filter: s.replayFilter}
+		}
+	}
+
+	grpcSrv, err := grpc_new_server(tlsConfig, s.replayFilter, s.config.GRPC, func(conn net.Conn) {
+		rec := newRecordingConn(conn)
+		client, addrType, addr, port, err := trojan_accept(rec, s.trojanClients)
+		if err != nil {
+			s.serveTrojanDecoy(conn, rec.Recorded())
+			return
+		}
+		s.relayToTarget(conn, "trojan:"+client.Email, addrType, addr, port)
+	})
+	if err != nil {
+		return err
+	}
+
+	log.Printf("[Server] Trojan/gRPC server listening on %s (service=%s, security=%s)", s.config.BindAddress, grpc_service_name(s.config.GRPC), grpc_security(s.config.GRPC))
+	return grpcSrv.Serve(lis)
 }
 
 func (s *Server) startRedstone() error {
@@ -233,7 +425,7 @@ func (s *Server) startMirage() error {
 }
 
 func (s *Server) startReality() error {
-	disp, err := new_reality_dispatcher(s.config.Reality)
+	rs, err := new_reality_server(s.config.Reality)
 	if err != nil {
 		return err
 	}
@@ -250,29 +442,17 @@ func (s *Server) startReality() error {
 		if err != nil {
 			continue
 		}
-		go s.handleRealityConnection(conn, disp)
+		go s.handleRealityConnection(conn, rs)
 	}
 }
 
-func (s *Server) handleRealityConnection(conn net.Conn, disp *reality_dispatcher) {
-	pconn, err := reality_peek(conn, 76, 128)
+func (s *Server) handleRealityConnection(conn net.Conn, rs *reality_server) {
+	// rs.accept already fully handles both outcomes: on success it hands
+	// back a handshake-complete net.Conn; on failure it has already run
+	// the transparent live-mirrored fallback relay to Dest and closed conn
+	// itself, so there is nothing left to do here.
+	tconn, err := rs.accept(context.Background(), conn)
 	if err != nil {
-		conn.Close()
-		return
-	}
-
-	if s.replayFilter != nil {
-		peek := pconn.Peek()
-		if len(peek) > 43 && peek[0] == 0x16 {
-			if s.replayFilter.CheckAndAdd(peek[11 : 11+32]) {
-				pconn.Close()
-				return
-			}
-		}
-	}
-
-	tconn, ours := disp.accept(pconn)
-	if !ours {
 		return
 	}
 	s.handleTLSConnection(tconn)

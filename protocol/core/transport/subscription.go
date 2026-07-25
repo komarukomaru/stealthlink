@@ -32,6 +32,15 @@ type ServerEntry struct {
 	Transport   string `json:"transport"`
 	SecretPath  string `json:"secret_path,omitempty"`
 	Fingerprint string `json:"fingerprint,omitempty"`
+
+	// UUID/TrojanPassword/XHTTP/GRPC are only used when Transport is
+	// "vless-xhttp" or "trojan-grpc" - these are a different protocol
+	// family from the PSK-based StealthLink transports above and don't
+	// participate in their automatic tls/quic fallback.
+	UUID           string       `json:"uuid,omitempty"`
+	TrojanPassword string       `json:"trojan_password,omitempty"`
+	XHTTP          *XHTTPConfig `json:"xhttp,omitempty"`
+	GRPC           *GRPCConfig  `json:"grpc,omitempty"`
 }
 
 const subscriptionScheme = "stealthlink://"
@@ -334,17 +343,17 @@ func normalizeServerEntries(servers []ServerEntry) {
 	}
 }
 
+// normalizeStoredTransport canonicalizes a transport string for storage on
+// a ServerEntry. This used to only recognize tls/quic/auto and silently
+// blanked everything else (reality, mirage, masque, redstone, webrtc,
+// vless-xhttp, trojan-grpc) back to "" - meaning any of those imported via
+// a subscription or a vless://trojan:// link would lose their transport
+// the moment they passed through the selector and silently fall back to
+// whatever the client's own default transport was. normalizeTransportPreference
+// already canonicalizes every transport this project knows about, so just
+// delegate to it.
 func normalizeStoredTransport(transport string) string {
-	switch normalizeTransportPreference(transport) {
-	case "tls":
-		return "tls"
-	case "quic":
-		return "quic"
-	case "auto":
-		return "auto"
-	default:
-		return ""
-	}
+	return normalizeTransportPreference(transport)
 }
 
 func normalizeTransportPreference(transport string) string {
@@ -363,6 +372,10 @@ func normalizeTransportPreference(transport string) string {
 		return "redstone"
 	case "webrtc":
 		return "webrtc"
+	case "vless-xhttp":
+		return "vless-xhttp"
+	case "trojan-grpc":
+		return "trojan-grpc"
 	case "any", "auto":
 		return "auto"
 	default:
@@ -379,7 +392,8 @@ func buildTransportVariants(base ServerEntry, preferredTransport string) []Serve
 		primary = "tls"
 	}
 
-	if primary == "reality" || primary == "mirage" || primary == "masque" || primary == "redstone" || primary == "webrtc" {
+	if primary == "reality" || primary == "mirage" || primary == "masque" || primary == "redstone" || primary == "webrtc" ||
+		primary == "vless-xhttp" || primary == "trojan-grpc" {
 		variant := base
 		variant.Transport = primary
 		if variant.Weight <= 0 {
@@ -413,7 +427,10 @@ func buildTransportVariants(base ServerEntry, preferredTransport string) []Serve
 
 func serverStatsKey(server ServerEntry) string {
 	transport := normalizeTransportPreference(server.Transport)
-	if transport != "quic" {
+	switch transport {
+	case "quic", "vless-xhttp", "trojan-grpc":
+		// keep as-is
+	default:
 		transport = "tls"
 	}
 	return server.Address + "|" + transport

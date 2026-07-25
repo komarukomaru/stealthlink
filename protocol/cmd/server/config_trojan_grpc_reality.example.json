@@ -1,0 +1,45 @@
+{
+    "bind_address": ":443",
+    "sni": "kicker.de",
+    "transport": "trojan-grpc",
+    "trojan": {
+        "clients": [
+            {
+                "password": "CHANGE-ME-RANDOM-STRING-HERE",
+                "email": "user1@example.com"
+            }
+        ]
+    },
+    "grpc": {
+        "serviceName": "gRPC",
+        "multiMode": false,
+        "authority": "",
+        "security": "reality",
+        "reality": {
+            "dest": "kicker.de:443",
+            "server_name": "kicker.de",
+            "private_key": "GENERATE-WITH-server--gen-reality",
+            "short_ids": [
+                "05"
+            ]
+        },
+        "idle_timeout": 20,
+        "health_check_timeout": 10,
+        "permit_without_stream": true,
+        "initial_windows_size": 0
+    },
+    "firewall": {
+        "blocked_ports": [
+            25,
+            465,
+            587,
+            137,
+            138,
+            139,
+            445
+        ],
+        "max_connections_per_user": 2000,
+        "max_bandwidth_default": 0,
+        "allow_private_ranges": false
+    }
+}
