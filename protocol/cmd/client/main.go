@@ -17,7 +17,7 @@ func main() {
 	serverAddr := flag.String("server", "", "Server address (host:port)")
 	psk := flag.String("psk", "", "Pre-shared key for authentication")
 	sni := flag.String("sni", "", "SNI hostname (defaults to server hostname)")
-	transportMode := flag.String("transport", "tls", "Transport mode: tls, quic, auto, reality, mirage, masque, redstone, webrtc, vless-xhttp, or trojan-grpc")
+	transportMode := flag.String("transport", "tls", "Transport mode: tls, quic, or auto")
 	socksAddr := flag.String("socks", "127.0.0.1:1080", "SOCKS5 proxy listen address")
 	httpAddr := flag.String("http", "", "HTTP proxy listen address (optional)")
 	secretPath := flag.String("path", "/api/v2/sync", "Secret path for HTTP camouflage auth")
@@ -31,25 +31,11 @@ func main() {
 	miragePath := flag.String("mirage-path", "", "HTTP path prefix for transport=mirage (must match server)")
 	masquePath := flag.String("masque-path", "", "HTTP/3 CONNECT path for transport=masque (must match server)")
 	webrtcPath := flag.String("webrtc-path", "", "HTTPS signaling path for transport=webrtc (must match server)")
-	uuid := flag.String("uuid", "", "VLESS client UUID for transport=vless-xhttp")
-	trojanPassword := flag.String("trojan-password", "", "Trojan client password for transport=trojan-grpc")
-	xhttpPath := flag.String("xhttp-path", "", "HTTP path prefix for transport=vless-xhttp (must match server)")
-	xhttpHost := flag.String("xhttp-host", "", "Host header for transport=vless-xhttp (defaults to SNI)")
-	xhttpMode := flag.String("xhttp-mode", "auto", "XHTTP mode: auto, packet-up, stream-up, or stream-one")
-	grpcService := flag.String("grpc-service", "", "gRPC service name for transport=trojan-grpc (defaults to GunService)")
-	link := flag.String("link", "", "Import a single server from a vless://, trojan://, or stealthlink:// link")
 	flag.Parse()
 
 	var subscription *transport.SubscriptionConfig
 
-	if *link != "" {
-		entry, err := transport.ImportLink(*link)
-		if err != nil {
-			log.Fatalf("Invalid -link: %v", err)
-		}
-		subscription = &transport.SubscriptionConfig{Name: "link", Servers: []transport.ServerEntry{*entry}}
-		log.Printf("Imported server from link: %s (transport=%s)", entry.Address, entry.Transport)
-	} else if *subURL != "" {
+	if *subURL != "" {
 		sub, err := transport.DecodeSubscriptionURL(*subURL)
 		if err != nil {
 			log.Fatalf("Invalid subscription URL: %v", err)
@@ -57,7 +43,7 @@ func main() {
 		subscription = sub
 		log.Printf("Subscription loaded: %s (%d servers)", sub.Name, len(sub.Servers))
 	} else if *serverAddr == "" {
-		log.Fatal("Either -server, -sub, or -link must be specified")
+		log.Fatal("Either -server or -sub must be specified")
 	}
 
 	paddingCfg := transport.DefaultPaddingConfig()
@@ -89,17 +75,6 @@ func main() {
 		MiragePath:       *miragePath,
 		MasquePath:       *masquePath,
 		WebRTCPath:       *webrtcPath,
-
-		VlessUUID:      *uuid,
-		TrojanPassword: *trojanPassword,
-		XHTTPCfg: transport.XHTTPConfig{
-			Path: *xhttpPath,
-			Host: *xhttpHost,
-			Mode: *xhttpMode,
-		},
-		GRPCCfg: transport.GRPCConfig{
-			ServiceName: *grpcService,
-		},
 	}
 
 	client := transport.NewClient(config)

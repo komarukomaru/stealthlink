@@ -32,14 +32,6 @@ type Config struct {
 
 	WebRTC transport.WebRTCConfig `json:"webrtc"`
 
-	Vless transport.VlessConfig `json:"vless"`
-
-	Trojan transport.TrojanConfig `json:"trojan"`
-
-	XHTTP transport.XHTTPConfig `json:"xhttp"`
-
-	GRPC transport.GRPCConfig `json:"grpc"`
-
 	Users []*transport.UserRecord `json:"users"`
 
 	Firewall transport.FirewallConfig `json:"firewall"`
@@ -162,10 +154,6 @@ func (c *Config) ToServerConfig() transport.ServerConfig {
 		Masque:      c.Masque,
 		Redstone:    c.Redstone,
 		WebRTC:      c.WebRTC,
-		Vless:       c.Vless,
-		Trojan:      c.Trojan,
-		XHTTP:       c.XHTTP,
-		GRPC:        c.GRPC,
 		Users:       c.Users,
 		FirewallCfg: c.Firewall,
 		PaddingCfg:  paddingCfg,

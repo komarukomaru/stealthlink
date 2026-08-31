@@ -5,16 +5,12 @@
 package transport
 
 import (
-	"context"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/ecdh"
-	"crypto/ed25519"
-	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
-	"crypto/sha512"
-	"crypto/x509"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
@@ -24,76 +20,26 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cloudflare/circl/sign/mldsa/mldsa65"
-	utls "github.com/refraction-networking/utls"
-	xreality "github.com/xtls/reality"
 	"golang.org/x/crypto/hkdf"
-)
 
-// REALITY, matching the current (2026) Xray-core wire protocol - NOT the
-// older simplified scheme (ephemeral X25519 key transmitted in SessionId,
-// separately AES-GCM-sealed shortid+hour in Random) this file used to
-// implement, which turned out to be wire-incompatible with any real Xray
-// endpoint. Verified directly against github.com/XTLS/Xray-core's
-// transport/internet/reality/reality.go (client side) and
-// github.com/xtls/reality (server side, a full fork of Go's crypto/tls
-// with REALITY's record-detection/mirroring/fallback baked into the TLS
-// 1.3 handshake state machine itself - not something worth hand-rolling).
-//
-// Client side (reality_dial_ctx below) mirrors Xray-core's UClient exactly:
-// the "AuthKey" is not a separately transmitted ephemeral key - it's
-// ECDH(the *same* TLS 1.3 key share utls already generated for the real
-// handshake, whether classic X25519 or the X25519 component of a hybrid
-// X25519MLKEM768 share, server's static REALITY public key), HKDF'd with
-// salt=ClientHello.Random[:20] and info="REALITY". ClientHello.SessionId
-// is repurposed as version(3)+reserved(1)+unix-timestamp(4)+shortid(24),
-// then AES-GCM sealed in place (nonce=ClientHello.Random[20:], AAD=the
-// *entire* ClientHello.Raw). The server's fake certificate is verified by
-// recomputing the same AuthKey and checking it was used as an
-// HMAC-SHA512 key over the cert's Ed25519 public key, stored in place of
-// the certificate's signature.
-//
-// Server side (reality_server below) just delegates entirely to
-// github.com/xtls/reality's Server(), which performs the equivalent
-// checks plus the live traffic-mirroring transparent fallback to Dest for
-// anything that doesn't authenticate - reimplementing that faithfully by
-// hand would mean forking a TLS 1.3 server handshake state machine.
-const (
-	reality_short_id_len = 8
-	reality_dial_timeout = 15 * time.Second
-
-	// Claimed client version (SessionId[0:3]) for servers that enforce
-	// Config.MinClientVer/MaxClientVer. Matches a recent real Xray-core
-	// release so interop isn't blocked by admin-configured version gates -
-	// we do speak the current protocol correctly, this just avoids being
-	// mistaken for stale/unknown software.
-	reality_client_version_x byte = 26
-	reality_client_version_y byte = 7
-	reality_client_version_z byte = 11
+	utls "github.com/refraction-networking/utls"
 )
 
 type RealityConfig struct {
-	Enabled     bool     `json:"enabled"`
-	Dest        string   `json:"dest"`
-	ServerName  string   `json:"server_name"`
-	ServerNames []string `json:"server_names,omitempty"`
-	PrivateKey  string   `json:"private_key"`
-	PublicKey   string   `json:"public_key"`
-	ShortID     string   `json:"short_id"`
-	ShortIDs    []string `json:"short_ids"`
-
-	// Show enables the (very verbose) diagnostic printf logging built
-	// into github.com/xtls/reality - useful when debugging interop
-	// against a real endpoint, noisy otherwise.
-	Show bool `json:"show,omitempty"`
-
-	// Mldsa65Seed (server, 32 bytes base64) and Mldsa65Verify (client,
-	// 1952-byte ML-DSA-65 public key, base64) are REALITY's optional
-	// post-quantum signature add-on layered on top of the Ed25519 check
-	// above - this is what a "pqv" share-link query parameter carries.
-	Mldsa65Seed   string `json:"mldsa65_seed,omitempty"`
-	Mldsa65Verify string `json:"mldsa65_verify,omitempty"`
+	Enabled    bool     `json:"enabled"`
+	Dest       string   `json:"dest"`
+	ServerName string   `json:"server_name"`
+	PrivateKey string   `json:"private_key"`
+	PublicKey  string   `json:"public_key"`
+	ShortID    string   `json:"short_id"`
+	ShortIDs   []string `json:"short_ids"`
 }
+
+const (
+	reality_short_id_len = 8
+	reality_dial_timeout = 15 * time.Second
+	reality_hkdf_info    = "stealthlink-reality-v1|clienthello-auth"
+)
 
 func GenerateRealityKeypair() (privateKey string, publicKey string, err error) {
 	return generate_reality_keypair()
@@ -106,20 +52,6 @@ func generate_reality_keypair() (string, string, error) {
 	}
 	enc := base64.RawURLEncoding
 	return enc.EncodeToString(priv.Bytes()), enc.EncodeToString(priv.PublicKey().Bytes()), nil
-}
-
-// GenerateRealityMldsa65Keypair generates the optional post-quantum
-// signature keypair: seed (server config: mldsa65_seed) and the
-// corresponding public key (client config / share-link: mldsa65_verify,
-// aka "pqv").
-func GenerateRealityMldsa65Keypair() (seed string, verify string, err error) {
-	var seedBytes [mldsa65.SeedSize]byte
-	if _, err := rand.Read(seedBytes[:]); err != nil {
-		return "", "", err
-	}
-	pub, _ := mldsa65.NewKeyFromSeed(&seedBytes)
-	enc := base64.RawURLEncoding
-	return enc.EncodeToString(seedBytes[:]), enc.EncodeToString(pub.Bytes()), nil
 }
 
 func decode_key_bytes(s string) ([]byte, error) {
@@ -136,21 +68,6 @@ func decode_key_bytes(s string) ([]byte, error) {
 		return b, nil
 	}
 	return nil, fmt.Errorf("key must be 32 bytes (base64 or hex)")
-}
-
-// decode_b64_any decodes a base64 string of any length, trying the
-// encodings real Xray share-links and configs use interchangeably.
-func decode_b64_any(s string) ([]byte, error) {
-	s = strings.TrimSpace(s)
-	if s == "" {
-		return nil, fmt.Errorf("empty value")
-	}
-	for _, dec := range []*base64.Encoding{base64.RawURLEncoding, base64.StdEncoding, base64.RawStdEncoding, base64.URLEncoding} {
-		if b, err := dec.DecodeString(s); err == nil {
-			return b, nil
-		}
-	}
-	return nil, fmt.Errorf("invalid base64 value")
 }
 
 func parse_x25519_private(s string) (*ecdh.PrivateKey, error) {
@@ -186,6 +103,67 @@ func parse_short_id(s string) ([reality_short_id_len]byte, error) {
 	return out, nil
 }
 
+func reality_derive(shared []byte) ([32]byte, [12]byte, error) {
+	var key [32]byte
+	var nonce [12]byte
+	r := hkdf.New(sha256.New, shared, nil, []byte(reality_hkdf_info))
+	if _, err := io.ReadFull(r, key[:]); err != nil {
+		return key, nonce, err
+	}
+	if _, err := io.ReadFull(r, nonce[:]); err != nil {
+		return key, nonce, err
+	}
+	return key, nonce, nil
+}
+
+func reality_seal(shared []byte, sid [reality_short_id_len]byte, hour int64) ([32]byte, error) {
+	var out [32]byte
+	key, nonce, err := reality_derive(shared)
+	if err != nil {
+		return out, err
+	}
+	block, err := aes.NewCipher(key[:])
+	if err != nil {
+		return out, err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return out, err
+	}
+	pt := make([]byte, 16)
+	copy(pt[:reality_short_id_len], sid[:])
+	binary.BigEndian.PutUint64(pt[reality_short_id_len:], uint64(hour))
+	ct := gcm.Seal(nil, nonce[:], pt, nil)
+	if len(ct) != 32 {
+		return out, fmt.Errorf("unexpected sealed length %d", len(ct))
+	}
+	copy(out[:], ct)
+	return out, nil
+}
+
+func reality_open(shared []byte, box [32]byte) ([reality_short_id_len]byte, int64, bool) {
+	var sid [reality_short_id_len]byte
+	key, nonce, err := reality_derive(shared)
+	if err != nil {
+		return sid, 0, false
+	}
+	block, err := aes.NewCipher(key[:])
+	if err != nil {
+		return sid, 0, false
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return sid, 0, false
+	}
+	pt, err := gcm.Open(nil, nonce[:], box[:], nil)
+	if err != nil || len(pt) != 16 {
+		return sid, 0, false
+	}
+	copy(sid[:], pt[:reality_short_id_len])
+	hour := int64(binary.BigEndian.Uint64(pt[reality_short_id_len:]))
+	return sid, hour, true
+}
+
 func reality_hello_id(fingerprint string) utls.ClientHelloID {
 	switch strings.ToLower(strings.TrimSpace(fingerprint)) {
 	case "firefox":
@@ -209,146 +187,49 @@ func reality_hello_id(fingerprint string) utls.ClientHelloID {
 	}
 }
 
-// --- client side ---
-
-// reality_client_conn tracks the AuthKey derived during the handshake and
-// whether VerifyPeerCertificate confirmed the server actually holds the
-// matching REALITY private key (as opposed to us having been transparently
-// proxied to the real Dest by a server we don't have a valid token for, or
-// an on-path attacker).
-type reality_client_conn struct {
-	authKey       []byte
-	mldsa65Verify []byte
-	verified      bool
-	uconn         *utls.UConn
-}
-
-func (rc *reality_client_conn) verifyPeerCertificate(rawCerts [][]byte, _ [][]*x509.Certificate) error {
-	if len(rawCerts) == 0 {
-		return fmt.Errorf("reality: no certificate presented")
-	}
-	cert, err := x509.ParseCertificate(rawCerts[0])
-	if err != nil {
-		return fmt.Errorf("reality: certificate parse failed: %w", err)
-	}
-	pub, ok := cert.PublicKey.(ed25519.PublicKey)
-	if !ok {
-		return fmt.Errorf("reality: unexpected certificate key type %T", cert.PublicKey)
-	}
-
-	h := hmac.New(sha512.New, rc.authKey)
-	h.Write(pub)
-	if !hmac.Equal(h.Sum(nil), cert.Signature) {
-		return fmt.Errorf("reality: certificate signature mismatch (invalid token, MITM, or wrong public key)")
-	}
-
-	if len(rc.mldsa65Verify) > 0 {
-		if len(cert.Extensions) == 0 {
-			return fmt.Errorf("reality: mldsa65_verify configured but server sent no post-quantum signature")
-		}
-		h.Write(rc.uconn.HandshakeState.Hello.Raw)
-		h.Write(rc.uconn.HandshakeState.ServerHello.Raw)
-		verifyKey, err := mldsa65.Scheme().UnmarshalBinaryPublicKey(rc.mldsa65Verify)
-		if err != nil {
-			return fmt.Errorf("reality: invalid mldsa65_verify key: %w", err)
-		}
-		pk, ok := verifyKey.(*mldsa65.PublicKey)
-		if !ok || !mldsa65.Verify(pk, h.Sum(nil), nil, cert.Extensions[0].Value) {
-			return fmt.Errorf("reality: ML-DSA-65 signature verification failed")
-		}
-	}
-
-	rc.verified = true
-	return nil
-}
-
 func reality_dial(server_addr, server_name, fingerprint string, server_pub *ecdh.PublicKey, sid [reality_short_id_len]byte) (net.Conn, error) {
-	return reality_dial_ctx(context.Background(), server_addr, server_name, fingerprint, []string{"http/1.1"}, server_pub, sid, nil)
-}
+	eph, err := ecdh.X25519().GenerateKey(rand.Reader)
+	if err != nil {
+		return nil, err
+	}
+	shared, err := eph.ECDH(server_pub)
+	if err != nil {
+		return nil, fmt.Errorf("ecdh failed: %w", err)
+	}
 
-// reality_dial_ctx is the context-aware, ALPN-configurable REALITY client
-// handshake, shared by the plain "reality" transport (alpn=["http/1.1"],
-// via reality_dial above) and REALITY-over-gRPC (alpn=["h2"]).
-// mldsa65Verify may be nil to skip the optional post-quantum check.
-func reality_dial_ctx(ctx context.Context, server_addr, server_name, fingerprint string, alpn []string, server_pub *ecdh.PublicKey, sid [reality_short_id_len]byte, mldsa65Verify []byte) (net.Conn, error) {
-	dialer := &net.Dialer{Timeout: reality_dial_timeout}
-	tcp, err := dialer.DialContext(ctx, "tcp", server_addr)
+	hour := time.Now().Unix() / 3600
+	box, err := reality_seal(shared, sid, hour)
+	if err != nil {
+		return nil, err
+	}
+
+	tcp, err := net.DialTimeout("tcp", server_addr, reality_dial_timeout)
 	if err != nil {
 		return nil, fmt.Errorf("tcp dial failed: %w", err)
 	}
 
-	rc := &reality_client_conn{mldsa65Verify: mldsa65Verify}
 	uconf := &utls.Config{
-		ServerName:             server_name,
-		InsecureSkipVerify:     true,
-		SessionTicketsDisabled: true,
-		NextProtos:             alpn,
-		VerifyPeerCertificate:  rc.verifyPeerCertificate,
+		ServerName:         server_name,
+		InsecureSkipVerify: true,
+		NextProtos:         []string{"http/1.1"},
 	}
 	uconn := utls.UClient(tcp, uconf, reality_hello_id(fingerprint))
-	rc.uconn = uconn
 
 	if err := uconn.BuildHandshakeState(); err != nil {
 		tcp.Close()
 		return nil, fmt.Errorf("build hello failed: %w", err)
 	}
 
-	hello := uconn.HandshakeState.Hello
-	// The AAD for the AEAD seal below is hello.Raw with the SessionId
-	// region still zeroed - the server reconstructs the exact same AAD by
-	// zeroing that region of the raw bytes it received in place before
-	// verifying. So the zero-copy into Raw must happen *before* SessionId
-	// is filled in with the real version/timestamp/shortid, and Raw must
-	// not be touched again until after sealing.
-	hello.SessionId = make([]byte, 32)
-	copy(hello.Raw[39:], hello.SessionId) // fixed location of Session ID in the raw ClientHello; zeros it there
-	hello.SessionId[0] = reality_client_version_x
-	hello.SessionId[1] = reality_client_version_y
-	hello.SessionId[2] = reality_client_version_z
-	hello.SessionId[3] = 0
-	binary.BigEndian.PutUint32(hello.SessionId[4:], uint32(time.Now().Unix()))
-	copy(hello.SessionId[8:], sid[:])
-
-	ecdhe := uconn.HandshakeState.State13.KeyShareKeys.Ecdhe
-	if ecdhe == nil {
-		ecdhe = uconn.HandshakeState.State13.KeyShareKeys.MlkemEcdhe
-	}
-	if ecdhe == nil {
-		tcp.Close()
-		return nil, fmt.Errorf("reality: fingerprint %q does not offer a TLS 1.3 key share, cannot handshake", fingerprint)
-	}
-	authKey, err := ecdhe.ECDH(server_pub)
-	if err != nil || authKey == nil {
-		tcp.Close()
-		return nil, fmt.Errorf("reality: ecdh failed")
-	}
-	if _, err := hkdf.New(sha256.New, authKey, hello.Random[:20], []byte("REALITY")).Read(authKey); err != nil {
+	epub := eph.PublicKey().Bytes()
+	uconn.HandshakeState.Hello.SessionId = epub
+	if err := uconn.SetClientRandom(box[:]); err != nil {
 		tcp.Close()
 		return nil, err
 	}
-	rc.authKey = authKey
 
-	block, err := aes.NewCipher(authKey)
-	if err != nil {
-		tcp.Close()
-		return nil, err
-	}
-	aead, err := cipher.NewGCM(block)
-	if err != nil {
-		tcp.Close()
-		return nil, err
-	}
-	aead.Seal(hello.SessionId[:0], hello.Random[20:], hello.SessionId[:16], hello.Raw)
-	copy(hello.Raw[39:], hello.SessionId)
-
-	if err := uconn.HandshakeContext(ctx); err != nil {
+	if err := uconn.Handshake(); err != nil {
 		tcp.Close()
 		return nil, fmt.Errorf("reality handshake failed: %w", err)
-	}
-
-	if !rc.verified {
-		tcp.Close()
-		return nil, fmt.Errorf("reality: server certificate verification failed (invalid token, MITM, or wrong public key)")
 	}
 
 	TuneTCPConn(tcp)
@@ -400,22 +281,15 @@ func reality_dial_vpn(server_addr, server_name, fingerprint, psk string, server_
 	return conn, nil
 }
 
-// --- server side ---
-
-// reality_server wraps github.com/xtls/reality's Config/Server: that
-// package handles ClientHello record detection, live traffic mirroring to
-// Dest during the handshake attempt, the REALITY auth check itself, and -
-// for anything that doesn't authenticate - a fully transparent
-// bidirectional relay to Dest, entirely internally. accept() either
-// returns a fully handshake-complete net.Conn (authenticated) or an error
-// (not authenticated - the fallback relay already ran to completion and
-// the raw connection is already closed, there is nothing left to do).
-type reality_server struct {
-	cfg *xreality.Config
+type reality_dispatcher struct {
+	priv    *ecdh.PrivateKey
+	allowed map[[reality_short_id_len]byte]bool
+	dest    string
+	cert    *tls.Certificate
 }
 
-func new_reality_server(cfg RealityConfig) (*reality_server, error) {
-	priv, err := decode_key_bytes(cfg.PrivateKey)
+func new_reality_dispatcher(cfg RealityConfig) (*reality_dispatcher, error) {
+	priv, err := parse_x25519_private(cfg.PrivateKey)
 	if err != nil {
 		return nil, fmt.Errorf("reality private_key: %w", err)
 	}
@@ -423,79 +297,118 @@ func new_reality_server(cfg RealityConfig) (*reality_server, error) {
 		return nil, fmt.Errorf("reality dest is required")
 	}
 
-	names := append([]string{}, cfg.ServerNames...)
-	if cfg.ServerName != "" {
-		names = append(names, cfg.ServerName)
-	}
-	if len(names) == 0 {
-		names = append(names, hostOnly(cfg.Dest))
-	}
-	serverNames := make(map[string]bool, len(names))
-	for _, n := range names {
-		serverNames[n] = true
-	}
-
-	ids := append([]string{}, cfg.ShortIDs...)
+	allowed := make(map[[reality_short_id_len]byte]bool)
+	ids := cfg.ShortIDs
 	if cfg.ShortID != "" {
 		ids = append(ids, cfg.ShortID)
 	}
-	shortIds := make(map[[8]byte]bool)
 	if len(ids) == 0 {
-		shortIds[[8]byte{}] = true
+		var zero [reality_short_id_len]byte
+		allowed[zero] = true
 	}
 	for _, s := range ids {
 		sid, perr := parse_short_id(s)
 		if perr != nil {
 			return nil, perr
 		}
-		shortIds[sid] = true
+		allowed[sid] = true
 	}
 
-	rc := &xreality.Config{
-		DialContext: (&net.Dialer{Timeout: 10 * time.Second}).DialContext,
-		Show:        cfg.Show,
-		Type:        "tcp",
-		Dest:        cfg.Dest,
-		ServerNames: serverNames,
-		PrivateKey:  priv,
-		ShortIds:    shortIds,
+	sni := cfg.ServerName
+	if sni == "" {
+		sni = hostOnly(cfg.Dest)
+	}
+	cert, err := CloneCertFromTarget(cfg.Dest, sni)
+	if err != nil {
+		return nil, fmt.Errorf("reality cert: %w", err)
 	}
 
-	if cfg.Mldsa65Seed != "" {
-		seed, err := decode_b64_any(cfg.Mldsa65Seed)
-		if err != nil || len(seed) != mldsa65.SeedSize {
-			return nil, fmt.Errorf("reality mldsa65_seed: must be %d bytes base64", mldsa65.SeedSize)
+	return &reality_dispatcher{
+		priv:    priv,
+		allowed: allowed,
+		dest:    cfg.Dest,
+		cert:    &cert,
+	}, nil
+}
+
+func reality_peek(conn net.Conn, min, max int) (*PeekingConn, error) {
+	buf := make([]byte, max)
+	total := 0
+	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	for total < min {
+		n, err := conn.Read(buf[total:])
+		total += n
+		if err != nil {
+			break
 		}
-		_, key := mldsa65.NewKeyFromSeed((*[mldsa65.SeedSize]byte)(seed))
-		rc.Mldsa65Key = key.Bytes()
+		if total >= max {
+			break
+		}
 	}
-
-	return &reality_server{cfg: rc}, nil
+	conn.SetReadDeadline(time.Time{})
+	if total == 0 {
+		return nil, fmt.Errorf("empty read")
+	}
+	return &PeekingConn{Conn: conn, peekBuf: buf[:total]}, nil
 }
 
-func (rs *reality_server) accept(ctx context.Context, conn net.Conn) (net.Conn, error) {
-	return xreality.Server(ctx, conn, rs.cfg)
+func is_reality_client_hello(peek []byte) bool {
+	return len(peek) >= 76 && peek[0] == 0x16 && peek[5] == 0x01 && peek[43] == 32
 }
 
-// KNOWN LIMITATION: in local loopback testing (client here talking to our
-// own reality_server, Dest a plain Go stdlib TLS 1.3 server), the handshake
-// itself completes and authenticates correctly - verified via
-// github.com/xtls/reality's own debug logging: ECDH/HKDF AuthKey matches on
-// both sides, ClientVer/ClientTime/ClientShortId decrypt correctly
-// server-side, and the server reports the session fully authenticated
-// (hs.c.conn == conn: true, handshake() err: <nil>). But the very first
-// subsequent Read() on the client then fails with "tls: unexpected
-// message": github.com/xtls/reality relays a reconstructed
-// "New Session Ticket" post-handshake message (mirroring whatever Dest's
-// real TLS stack sent) that this uTLS-based client can't parse as
-// well-formed. This reproduces consistently and deterministically in this
-// local, network-independent test, so it isn't a fluke - but whether it
-// also reproduces against arbitrary real-world Dest choices (different TLS
-// stacks may shape that message differently) is unconfirmed. Root-causing
-// it further needs either decrypting and inspecting the exact reconstructed
-// ticket bytes' TLS-level structure, or a byte-for-byte diff against a
-// packet capture of a genuine Xray-core client hitting the same server -
-// neither was feasible in the time available here. Tracked so this isn't
-// silently swept under the rug: see TestRealityEndToEndHandshake and
-// TestGRPCRealityEndToEnd, which are skipped with this exact explanation
-// rather than asserted as passing.
+func reality_hour_fresh(hour int64) bool {
+	now := time.Now().Unix() / 3600
+	return hour == now || hour == now-1 || hour == now+1
+}
+
+func (d *reality_dispatcher) accept(pconn *PeekingConn) (net.Conn, bool) {
+	if authed := d.match(pconn.Peek()); authed {
+		tconf := &tls.Config{
+			Certificates: []tls.Certificate{*d.cert},
+			MinVersion:   tls.VersionTLS12,
+			NextProtos:   []string{"http/1.1", "h2"},
+		}
+		return tls.Server(pconn, tconf), true
+	}
+	d.fallback(pconn)
+	return nil, false
+}
+
+func (d *reality_dispatcher) match(peek []byte) bool {
+	if !is_reality_client_hello(peek) {
+		return false
+	}
+	pub, err := ecdh.X25519().NewPublicKey(peek[44:76])
+	if err != nil {
+		return false
+	}
+	shared, err := d.priv.ECDH(pub)
+	if err != nil {
+		return false
+	}
+	var box [32]byte
+	copy(box[:], peek[11:43])
+	sid, hour, ok := reality_open(shared, box)
+	if !ok || !d.allowed[sid] || !reality_hour_fresh(hour) {
+		return false
+	}
+	return true
+}
+
+func (d *reality_dispatcher) fallback(pconn *PeekingConn) {
+	addr := d.dest
+	if _, _, err := net.SplitHostPort(addr); err != nil {
+		addr = net.JoinHostPort(addr, "443")
+	}
+	up, err := net.DialTimeout("tcp", addr, 10*time.Second)
+	if err != nil {
+		pconn.Close()
+		return
+	}
+	go func() {
+		io.Copy(up, pconn)
+		up.Close()
+	}()
+	io.Copy(pconn, up)
+	pconn.Close()
+}
